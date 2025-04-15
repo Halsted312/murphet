@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "murphet"
-version = "0.1.0"
+version = "0.1.3"
 description = "A Bayesian time-series model for churn rates with changepoints and seasonality"
 authors = [
   { name="Stephen Murphy", email="stephenjmurph@gmail.com" }
