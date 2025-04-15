@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=42", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "murphet"
+version = "0.1.0"
+description = "A Bayesian time-series model for churn rates with changepoints and seasonality"
+authors = [
+  { name="Stephen Murphy", email="stephenjmurph@gmail.com" }
+]
+readme = "README.md"
+requires-python = ">=3.7"
+dependencies = [
+  "cmdstanpy>=0.10.0",
+  "numpy>=1.19"
+]
+
+[tool.setuptools]
+# Additional configuration if necessary.
