@@ -5,7 +5,7 @@ with open("README.md", "r", encoding="utf-8") as fh:
 
 setuptools.setup(
     name="murphet",
-    version="0.1.0",
+    version="0.1.3",
     author="Stephen Murphy",
     author_email="stephenjmurph@gmail.com",
     description="A Bayesian time-series model for churn rates with changepoints and seasonality",
