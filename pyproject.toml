@@ -18,3 +18,7 @@ dependencies = [
 
 [tool.setuptools]
 # Additional configuration if necessary.
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = "test_*.py"
