@@ -1,24 +1,32 @@
 [build-system]
-requires = ["setuptools>=42", "wheel"]
+requires = ["setuptools>=64", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "murphet"
-version = "0.1.3"
-description = "A Bayesian time-series model for churn rates with changepoints and seasonality"
-authors = [
-  { name="Stephen Murphy", email="stephenjmurph@gmail.com" }
-]
-readme = "README.md"
-requires-python = ">=3.7"
+name            = "murphet"
+version         = "1.1.0"
+description     = "A Bayesian time-series model for churn rates with changepoints and seasonality"
+readme          = "README.md"
+requires-python = ">=3.8"
+license         = { text = "MIT" }
+
+authors = [{ name = "Stephen Murphy", email = "stephenjmurph@gmail.com" }]
+
+urls = { Homepage = "https://www.murphet.com",  Repository = "https://github.com/halsted312/murphet" }
+
 dependencies = [
-  "cmdstanpy>=0.10.0",
-  "numpy>=1.19"
+  "cmdstanpy>=1.1.0",
+  "numpy>=1.22"
 ]
 
-[tool.setuptools]
-# Additional configuration if necessary.
+[project.optional-dependencies]
+dev = ["pytest>=7", "build", "black", "pre-commit"]
+
+[tool.setuptools]                  #  ← matches setup.py
+package-dir = { "" = "src" }
+packages    = ["murphet"]
+include-package-data = true
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+testpaths    = ["tests"]
 python_files = "test_*.py"

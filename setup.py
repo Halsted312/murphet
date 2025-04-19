@@ -1,34 +1,37 @@
-import setuptools
+# setup.py  – PEP 517 fallback for editable installs (pip install -e .)
+from pathlib import Path
+from setuptools import setup, find_packages
 
-with open("README.md", "r", encoding="utf-8") as fh:
-    long_description = fh.read()
+ROOT = Path(__file__).parent
 
-setuptools.setup(
+setup(
     name="murphet",
-    version="0.1.3",
+    version="1.1.0",          # ← same as pyproject
+    description="A Bayesian time‑series model for churn rates with changepoints and seasonality",
+    long_description=(ROOT / "README.md").read_text(encoding="utf-8"),
+    long_description_content_type="text/markdown",
     author="Stephen Murphy",
     author_email="stephenjmurph@gmail.com",
-    description="A Bayesian time-series model for churn rates with changepoints and seasonality",
-    long_description=long_description,
-    long_description_content_type="text/markdown",
-    url="https://github.com/halsted312/murphet",
-    packages=setuptools.find_packages(),
+    url="https://www.murphet.com",
+    license="MIT",
+    python_requires=">=3.8",  # ← same floor as pyproject
+    keywords="bayesian time-series stan prophet churn",
+
+    # ---- src‑layout --------------------------------------------------------
+    package_dir={"": "src"},               # root of importable pkgs
+    packages=find_packages("src"),         # auto‑discover under ./src
     include_package_data=True,
-    package_data={
-        "murphet": ["*.stan"],
-    },
+    package_data={"murphet": ["*.stan"]},  # ship Stan files inside wheel
+
+    install_requires=[
+        "cmdstanpy>=1.1.0",
+        "numpy>=1.22",
+    ],
     classifiers=[
         "Programming Language :: Python :: 3",
         "License :: OSI Approved :: MIT License",
         "Operating System :: OS Independent",
         "Intended Audience :: Science/Research",
         "Topic :: Scientific/Engineering :: Mathematics",
-    ],
-    keywords="bayesian, time-series, prophet, stan, churn",
-    python_requires=">=3.7",
-    install_requires=[
-        "cmdstanpy>=0.10.0",
-        "numpy>=1.19",
-        "pandas>=1.0.0"
     ],
 )
