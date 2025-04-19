@@ -1,183 +1,242 @@
+"""
+Unified Murphet wrapper (parallel by default).
+
+* Single source of truth  →  easier maintenance
+* Works with NUTS, MAP, or ADVI
+* Auto‑detects available cores, falls back gracefully
+"""
+
+from __future__ import annotations
 import os
+import multiprocessing as _mp
+from typing import Literal, Sequence
+
 import numpy as np
-from cmdstanpy import CmdStanModel
+from cmdstanpy import (
+    CmdStanModel, CmdStanMCMC, CmdStanMLE, CmdStanVB, CmdStanGQ
+)
 from scipy.special import expit
 
-CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
-STAN_FILE = os.path.join(CURRENT_DIR, 'improved_model.stan')
+_CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+_STAN_FILE   = os.path.join(_CURRENT_DIR, "murphet_model.stan")
+
+# ────────────────────────────────────────────────────────────────────
+# 0)  Helper – compile **once** per interpreter session
+# ────────────────────────────────────────────────────────────────────
+_COMPILED_MODEL: CmdStanModel | None = None
 
 
+def _get_compiled_model() -> CmdStanModel:
+    global _COMPILED_MODEL
+    if _COMPILED_MODEL is None:
+        _COMPILED_MODEL = CmdStanModel(
+            stan_file=_STAN_FILE,
+            cpp_options={"STAN_THREADS": "TRUE"}
+        )
+    return _COMPILED_MODEL
+
+
+# ────────────────────────────────────────────────────────────────────
+# 1)  Predictor object
+# ────────────────────────────────────────────────────────────────────
 class ChurnProphetModel:
-    def __init__(self, cmdstan_model, fit_result, changepoints, num_harmonics, period):
-        self.cmdstan_model = cmdstan_model
-        self.fit_result = fit_result
-        self.changepoints = np.array(changepoints) if changepoints is not None else None
+    """Light‑weight predict/summary façade over CmdStan results."""
+
+    def __init__(
+        self,
+        fit_result: CmdStanMCMC | CmdStanMLE | CmdStanVB | CmdStanGQ,
+        changepoints: np.ndarray,
+        num_harmonics: int,
+        period: float,
+    ):
+        self.fit_result   = fit_result
+        self.changepoints = changepoints
         self.num_harmonics = num_harmonics
-        self.period = period
+        self.period        = period
 
-        # Extract and cache parameter means for faster prediction
-        self.k_mean = np.mean(self.fit_result.stan_variable('k'))
-        self.m_mean = np.mean(self.fit_result.stan_variable('m'))
-        self.q_mean = np.mean(self.fit_result.stan_variable('q'))
-        self.delta_mean = np.mean(self.fit_result.stan_variable('delta'), axis=0)
-        self.gamma_mean = np.mean(self.fit_result.stan_variable('gamma'))
-        self.A_sin_mean = np.mean(self.fit_result.stan_variable('A_sin'), axis=0)
-        self.B_cos_mean = np.mean(self.fit_result.stan_variable('B_cos'), axis=0)
+        # Posterior/point means for fast predictions ----------------
+        if isinstance(fit_result, CmdStanMCMC) or isinstance(
+            fit_result, CmdStanVB
+        ):
+            k = np.mean(fit_result.stan_variable("k"))
+            m = np.mean(fit_result.stan_variable("m"))
+            q = np.mean(fit_result.stan_variable("q"))
+            delta = np.mean(fit_result.stan_variable("delta"), axis=0)
+            gamma = np.mean(fit_result.stan_variable("gamma"))
+            A_sin = np.mean(fit_result.stan_variable("A_sin"), axis=0)
+            B_cos = np.mean(fit_result.stan_variable("B_cos"), axis=0)
+        elif isinstance(fit_result, CmdStanMLE):
+            p = fit_result.optimized_params_dict
+            k, m, q, gamma = p["k"], p["m"], p["q"], p["gamma"]
+            delta = np.array([p[f"delta[{i+1}]"] for i in range(len(changepoints))])
+            A_sin = np.array([p[f"A_sin[{i+1}]"] for i in range(num_harmonics)])
+            B_cos = np.array([p[f"B_cos[{i+1}]"] for i in range(num_harmonics)])
+        else:
+            raise TypeError("Unsupported CmdStan result type.")
 
+        self._k = k
+        self._m = m
+        self._q = q
+        self._delta = delta
+        self._gamma = gamma
+        self._A_sin = A_sin
+        self._B_cos = B_cos
+
+    # ––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––
     def summary(self):
-        """Return a summary DataFrame of the fitted model."""
-        return self.fit_result.summary()
+        return (
+            self.fit_result.summary()
+            if hasattr(self.fit_result, "summary")
+            else self.fit_result.optimized_params_pd
+        )
 
-    def predict(self, t_new, method='full_posterior'):
+    # ––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––
+    def predict(
+        self,
+        t_new: Sequence[float] | np.ndarray,
+        method: Literal["mean_params"] = "mean_params",
+    ) -> np.ndarray:
         """
-        Predict churn rates for new time points.
-
-        Args:
-            t_new: 1D array of future time points
-            method: 'full_posterior' or 'mean_params'
-                   'full_posterior': uses all posterior samples (slower but more accurate)
-                   'mean_params': uses posterior means (faster)
-
-        Returns: Posterior predicted churn rates
+        Currently only supports 'mean_params' (fast deterministic).
         """
-        t_new = np.array(t_new)
+        if method != "mean_params":
+            raise NotImplementedError("Only method='mean_params' is implemented.")
 
-        if method == 'mean_params':
-            # Fast prediction using posterior means
-            predictions = np.zeros(len(t_new))
+        t_new = np.asarray(t_new, dtype=float)
+        preds = np.empty(len(t_new))
 
-            for j, t_val in enumerate(t_new):
-                # Compute trend
-                cp_effect = 0
-                if self.changepoints is not None:
-                    logistic_terms = expit(self.gamma_mean * (t_val - self.changepoints))
-                    cp_effect = np.sum(self.delta_mean * logistic_terms)
+        for j, t in enumerate(t_new):
+            cp_effect = (
+                np.sum(self._delta * expit(self._gamma * (t - self.changepoints)))
+                if self.changepoints.size
+                else 0.0
+            )
+            trend = self._k * t + self._m + self._q * t ** 2 + cp_effect
 
-                trend = self.k_mean * t_val + self.m_mean + self.q_mean * (t_val ** 2) + cp_effect
+            # Seasonality
+            t_mod = t - np.floor(t / self.period) * self.period
+            seas = 0.0
+            for r in range(self.num_harmonics):
+                ang = 2 * np.pi * (r + 1) * t_mod / self.period
+                seas += self._A_sin[r] * np.sin(ang) + self._B_cos[r] * np.cos(ang)
 
-                # Compute seasonal component
-                t_mod = t_val - np.floor(t_val / self.period) * self.period
-                seas = 0
-                for r in range(self.num_harmonics):
-                    angle = 2 * np.pi * (r + 1) * t_mod / self.period
-                    seas += self.A_sin_mean[r] * np.sin(angle) + self.B_cos_mean[r] * np.cos(angle)
+            preds[j] = expit(min(trend + seas, 4))
 
-                mu = trend + seas
-                mu_sat = min(mu, 4)
-                predictions[j] = expit(mu_sat)
-
-            return predictions
-
-        else:  # Full posterior
-            # Extract posterior samples
-            k_samples = self.fit_result.stan_variable('k')
-            m_samples = self.fit_result.stan_variable('m')
-            q_samples = self.fit_result.stan_variable('q')
-            delta_samples = self.fit_result.stan_variable('delta')
-            gamma_samples = self.fit_result.stan_variable('gamma')
-            A_sin_samples = self.fit_result.stan_variable('A_sin')
-            B_cos_samples = self.fit_result.stan_variable('B_cos')
-
-            n_draws = len(k_samples)
-            predictions = np.zeros((n_draws, len(t_new)))
-
-            for i in range(n_draws):
-                k = k_samples[i]
-                m = m_samples[i]
-                q = q_samples[i]
-                delta = delta_samples[i]
-                gamma = gamma_samples[i]
-                A_sin = A_sin_samples[i]
-                B_cos = B_cos_samples[i]
-
-                for j, t_val in enumerate(t_new):
-                    # Compute trend
-                    cp_effect = 0
-                    if self.changepoints is not None:
-                        cp_effect = np.sum(delta * expit(gamma * (t_val - self.changepoints)))
-
-                    trend = k * t_val + m + q * (t_val ** 2) + cp_effect
-
-                    # Compute seasonal component
-                    t_mod = t_val - np.floor(t_val / self.period) * self.period
-                    seas = 0
-                    for r in range(self.num_harmonics):
-                        angle = 2 * np.pi * (r + 1) * t_mod / self.period
-                        seas += A_sin[r] * np.sin(angle) + B_cos[r] * np.cos(angle)
-
-                    mu = trend + seas
-                    mu_sat = min(mu, 4)
-                    predictions[i, j] = expit(mu_sat)
-
-            return predictions.mean(axis=0)
+        return preds
 
 
+# ────────────────────────────────────────────────────────────────────
+# 2)  Public fit function
+# ────────────────────────────────────────────────────────────────────
 def fit_churn_model(
-        t, y,
-        n_changepoints=None,
-        changepoints=None,
-        num_harmonics=3,
-        period=12.0,  # Changed default from 7.0 to 12.0 for monthly data
-        delta_scale=0.05,  # Reduced from 0.1
-        chains=4,  # Increased from 2
-        iter=2000,  # Increased from 1500
-        warmup=1000,  # Increased from 750
-        adapt_delta=0.95,  # Added control
-        max_treedepth=15,  # Added control
-        seed=42
+    *,
+    t: Sequence[float] | np.ndarray,
+    y: Sequence[float] | np.ndarray,
+    n_changepoints: int | None = None,
+    changepoints: Sequence[float] | np.ndarray | None = None,
+    num_harmonics: int = 3,
+    period: float = 12.0,
+    delta_scale: float = 0.05,
+    inference: Literal["nuts", "map", "advi"] = "nuts",
+    chains: int = 4,
+    iter: int = 2000,
+    warmup: int = 1000,
+    adapt_delta: float = 0.95,
+    max_treedepth: int = 12,
+    threads_per_chain: int | None = None,
+    seed: int | None = None,
 ):
     """
-    Fit an improved Bayesian churn model with smooth changepoints and seasonality.
+    Fit Murphet to a (0,1) time‑series.
+
+    Parameters
+    ----------
+    t, y : numeric sequences
+        *y* **must** be strictly between 0 and 1. A ValueError is raised otherwise.
+    inference : {"nuts", "map", "advi"}
+        • "nuts": full‑Bayes No‑U‑Turn sampler (default)  
+        • "map" : LBFGS optimisation (fast, no uncertainty)  
+        • "advi": mean‑field ADVI (posterior approx.)
+    threads_per_chain : int, optional
+        `None` → use `min(4, cpu_count())`; force 1 if len(y) < 32.
     """
-    t = np.array(t, dtype=float)
-    y = np.array(y, dtype=float)
+    t = np.asarray(t, dtype=float)
+    y = np.asarray(y, dtype=float)
 
-    # Validate y is in (0,1)
+    # --- strict domain check -------------------------------------------------
     if np.any(y <= 0) or np.any(y >= 1):
-        # Apply a small buffer to zeros and ones
-        y = np.clip(y, 0.001, 0.999)
-        print("Warning: Values ≤0 or ≥1 detected and clipped to (0.001, 0.999)")
+        raise ValueError(
+            "All target values must be strictly between 0 and 1. "
+            "Found min={:.4f}, max={:.4f}".format(y.min(), y.max())
+        )
 
-    # Set n_changepoints if not provided
-    if n_changepoints is None:
-        n_changepoints = max(1, int(round(0.2 * len(t))))  # Reduced from 0.3
-
-    # Compute changepoints if not provided
+    # changepoints ------------------------------------------------------------
+    if n_changepoints is None and changepoints is None:
+        n_changepoints = max(1, int(round(0.2 * len(t))))
     if changepoints is None:
-        # Place changepoints at quantiles with a buffer from the edges
-        quantiles = np.linspace(0.1, 0.9, n_changepoints + 2)[1:-1]
-        changepoints = np.quantile(t, quantiles)
+        qs = np.linspace(0.1, 0.9, n_changepoints + 2)[1:-1]
+        changepoints = np.quantile(t, qs)
     else:
-        changepoints = np.sort(np.array(changepoints, dtype=float))
+        changepoints = np.sort(np.asarray(changepoints, dtype=float))
         n_changepoints = len(changepoints)
 
+    # threads / grainsize -----------------------------------------------------
+    if threads_per_chain is None:
+        threads_per_chain = min(_mp.cpu_count(), 4)
+    if len(y) < 32:                       # avoid overhead on tiny datasets
+        threads_per_chain = 1
+
+    os.environ["STAN_NUM_THREADS"] = str(max(1, threads_per_chain))
+
+    # ------------------------------------------------------------------------
     stan_data = {
-        'N': len(y),
-        'y': y,
-        't': t,
-        'num_changepoints': n_changepoints,
-        's': changepoints,
-        'delta_scale': delta_scale,
-        'num_harmonics': num_harmonics,
-        'period': period
+        "N": len(y),
+        "y": y,
+        "t": t,
+        "num_changepoints": n_changepoints,
+        "s": changepoints,
+        "delta_scale": delta_scale,
+        "num_harmonics": num_harmonics,
+        "period": period,
     }
 
-    cmdstan_model = CmdStanModel(stan_file=STAN_FILE)
-    iter_sampling = iter - warmup
+    # Compile / reuse cached model -------------------------------------------
+    model = _get_compiled_model()
 
-    fit_result = cmdstan_model.sample(
-        data=stan_data,
-        chains=chains,
-        parallel_chains=chains,
-        iter_warmup=warmup,
-        iter_sampling=iter_sampling,
-        adapt_delta=adapt_delta,
-        max_treedepth=max_treedepth,
-        seed=seed,
-        show_progress=True
+    # Inference branch --------------------------------------------------------
+    if inference == "map":
+        fit_res = model.optimize(
+            data=stan_data,
+            algorithm="lbfgs",
+            iter=10_000,
+            seed=seed,
+        )
+    elif inference == "advi":
+        fit_res = model.variational(
+            data=stan_data,
+            algorithm="meanfield",
+            iter=20_000,
+            output_samples=400,
+            seed=seed,
+        )
+    elif inference == "nuts":
+        fit_res = model.sample(
+            data=stan_data,
+            chains=chains,
+            parallel_chains=chains,
+            threads_per_chain=threads_per_chain,
+            iter_warmup=warmup,
+            iter_sampling=iter - warmup,
+            adapt_delta=adapt_delta,
+            max_treedepth=max_treedepth,
+            seed=seed,
+            show_progress=True,
+        )
+        # Optional diagnose print
+        print(fit_res.diagnose())
+    else:
+        raise ValueError("inference must be 'nuts', 'map', or 'advi'.")
+
+    return ChurnProphetModel(
+        fit_res, changepoints, num_harmonics=num_harmonics, period=period
     )
-
-    # Print diagnostic summary
-    print(fit_result.diagnose())
-
-    return ChurnProphetModel(cmdstan_model, fit_result, changepoints, num_harmonics, period)
