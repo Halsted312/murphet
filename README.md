@@ -1,6 +1,6 @@
 # 📈 Murphet  — Prophet's (0-1) Cousin for Probabilities & Rates  
 
-[![PyPI version](https://img.shields.io/badge/pypi-v1.2.0-blue)](https://pypi.org/project/murphet/)
+[![PyPI version](https://img.shields.io/badge/pypi-v1.4.0-blue)](https://pypi.org/project/murphet/)
 [![Python](https://img.shields.io/badge/python-3.8%2B-blue)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
