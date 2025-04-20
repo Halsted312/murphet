@@ -12,3 +12,10 @@
 /tests/tuned_parameters_compare.py
 /examples/data/Churn_Rate.csv
 /examples/Test_Churn_Rate.ipynb
+/src/murphet/churn_model_parallel.py
+/src/murphet/model.stan
+/src/murphet/murphet_beta
+/src/murphet/murphet_model
+/src/murphet/murphet_model.stan
+/src/murphet/improved_model.stan
+/src/murphet/improved_model_parallel.stan
