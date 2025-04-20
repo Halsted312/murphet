@@ -87,17 +87,34 @@ class ChurnProphetModel:
             return float(arr.mean())
 
         def _vector(var: str) -> np.ndarray:
-            if is_mle:
-                # vec variables are already 1‑based in the dict
-                if var in fit.optimized_params_dict:  # whole vector (e.g. A_sin)
+            """
+            Return a 1‑D numpy array for Stan variable *var*
+            – works for both MCMC/VB (draws) and MAP/MLE (scalar dict).
+            """
+            if is_mle:                         # -------  MAP / MLE path
+                if var == "delta":
+                    n_cp = len(changepoints)
+                    return np.array(
+                        [fit.optimized_params_dict[f"delta[{i+1}]"] for i in range(n_cp)],
+                        dtype=float,
+                    )
+
+                if var in ("A_sin", "B_cos"):
+                    return np.array(
+                        [fit.optimized_params_dict[f"{var}[{i+1}]"] for i in range(self._H)],
+                        dtype=float,
+                    )
+
+                # vectors that are actually stored whole (rare)
+                if var in fit.optimized_params_dict:
                     return np.asarray(fit.optimized_params_dict[var], float)
-                # sliced name like "delta": rebuild by index
-                return np.array(
-                    [fit.optimized_params_dict[f"{var}[{i + 1}]"] for i in range(self._H)],
-                    dtype=float,
-                )
-            arr = np.asarray(fit.stan_variable(var), float)
+
+                raise KeyError(f"{var} not found in optimised params dict")
+
+            # -----------------------------  MCMC / VB path
+            arr = np.asarray(fit.stan_variable(var), float)      # draws × dim
             return arr.mean(axis=0) if arr.ndim == 2 else arr
+
 
         has = lambda v: hasattr(fit, "metadata") and v in fit.metadata.stan_vars
 

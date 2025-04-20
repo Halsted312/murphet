@@ -1,66 +1,63 @@
 // ─────────────────────────────────────────────────────────────
-//  Murphet  –  multi‑season model         (Beta likelihood head)
+//  Murphet – multi‑season model       (Beta likelihood head)
 //  • piece‑wise‑linear trend  +  AR(1) disturbance
 //  • weak‑Normal seasonality  (σ ≈ 10 · season_scale)
+//  • heteroscedastic precision:  φᵢ declines when |μ_det| is large
 // ─────────────────────────────────────────────────────────────
 functions {
-  /**  parallel log‑likelihood over y_slice          (beta head)
-   *
-   *   Arguments after `y_slice` & slice‑indices are passed through
-   *   reduce_sum() from the model block.
-   */
-  real partial_sum_beta(array[]   real  y_slice,
-                        int                start,
-                        int                end,
-                        vector             t,
-                        real               k,
-                        real               m,
-                        vector             delta,
-                        real               gamma,
-                        real               rho,        // NEW
-                        real               mu0,        // NEW
-                        vector             A_sin,
-                        vector             B_cos,
-                        real               phi,
-                        int                num_cp,
-                        vector             s,
-                        int                num_seasons,
-                        array[] int        n_harm,
-                        array[] real       period) {
+  /**  parallel log‑likelihood over a slice, beta head */
+  real partial_sum_beta(array[] real   y_slice,
+                        int             start,
+                        int             end,
+                        vector          t,
+                        real            k,
+                        real            m,
+                        vector          delta,
+                        real            gamma,
+                        real            rho,
+                        real            mu0,
+                        vector          A_sin,
+                        vector          B_cos,
+                        real            log_phi0,   // NEW
+                        real            beta_phi,   // NEW
+                        int             num_cp,
+                        vector          s,
+                        int             num_seasons,
+                        array[] int     n_harm,
+                        array[] real    period) {
 
     real lp  = 0;
-    real lag = mu0;                 // initialise latent AR(1) state
+    real lag = mu0;                     // AR(1) state
 
     for (i in 1:size(y_slice)) {
       int idx = start + i - 1;
 
-      // ------- piece‑wise‑linear trend --------------------------
+      // ── deterministic trend + CPs ────────────────────────────
       real cp = 0;
       for (j in 1:num_cp)
         cp += delta[j] * inv_logit(gamma * (t[idx] - s[j]));
       real mu_det = k * t[idx] + m + cp;
 
-      // ------- additive seasonality -----------------------------
-      real seas = 0;
-      int  pos  = 1;
+      // ── additive Fourier seasonality ─────────────────────────
+      int pos = 1;
       for (b in 1:num_seasons) {
         real tau = fmod(t[idx], period[b]);
         for (h in 1:n_harm[b]) {
-          real ang = 2 * pi() * h * tau / period[b];
-          seas    += A_sin[pos] * sin(ang)
-                   + B_cos[pos] * cos(ang);
-          pos     += 1;
+          real ang  = 2 * pi() * h * tau / period[b];
+          mu_det   += A_sin[pos] * sin(ang) + B_cos[pos] * cos(ang);
+          pos      += 1;
         }
       }
-      mu_det += seas;
 
-      // ------- AR(1) disturbance -------------------------------
-      real mu = mu_det + rho * lag;
-      lag     = mu;                 // propagate
+      // ── AR(1) disturbance  y* = μ_det + ρ·lag  ───────────────
+      real mu  = mu_det + rho * lag;
+      lag      = mu;
 
-      // ------- Beta likelihood  y ~ Beta(p·φ, (1‑p)·φ) ----------
-      real p  = inv_logit(mu);      // ensure 0<p<1
-      lp     += beta_lpdf(y_slice[i] | p * phi, (1 - p) * phi);
+      // ── heteroscedastic precision  φᵢ  ───────────────────────
+      real phi_i = exp(log_phi0 - beta_phi * abs(mu_det));
+      // ── Beta likelihood  yᵢ ~ Beta(p·φᵢ, (1‑p)·φᵢ) ───────────
+      real p   = inv_logit(mu);
+      lp      += beta_lpdf(y_slice[i] | p * phi_i, (1 - p) * phi_i);
     }
     return lp;
   }
@@ -84,7 +81,7 @@ data {
   real<lower=0>             season_scale;
 }
 
-// ─────────────────────── parameters ───────────────────────────
+// ───────────────────── parameters  ───────────────────────────
 parameters {
   // trend
   real k;
@@ -92,43 +89,46 @@ parameters {
   vector[num_changepoints] delta;
   real<lower=0> gamma;
 
-  // AR(1) disturbance
+  // AR(1)
   real<lower=-1,upper=1> rho;
-  real mu0;
+  real                   mu0;
 
   // seasonality
   vector[total_harmonics] A_sin;
   vector[total_harmonics] B_cos;
 
-  // beta precision
-  real<lower=0.1> phi;
+  // heteroscedastic precision
+  real log_phi0;            // unconstrained
+  real<lower=0> beta_phi;   // strength (0 = homoscedastic)
 }
 
-// ────────────────────────── model ─────────────────────────────
+// ───────────────────────── model  ────────────────────────────
 model {
-  // ---- priors: trend & CPs -----------------------------------
+  // trend priors
   k      ~ normal(0, 0.5);
   m      ~ normal(0, 5);
   delta  ~ double_exponential(0, delta_scale);
   gamma  ~ gamma(3, 1 / gamma_scale);
 
-  // ---- priors: AR(1) -----------------------------------------
-  rho  ~ normal(0, 0.3);                      // mild persistence
-  mu0  ~ normal(logit(mean(y)), 1);           // centre at mean rate
+  // AR(1) priors (ρ prior widened for quarterly macro data)
+  rho  ~ normal(0, 0.5);
+  mu0  ~ normal(logit(mean(y)), 1);
 
-  // ---- priors: seasonality -----------------------------------
+  // seasonality
   A_sin ~ normal(0, 10 * season_scale);
   B_cos ~ normal(0, 10 * season_scale);
 
-  // ---- priors: precision -------------------------------------
-  phi   ~ lognormal(log(20), 0.4);
+  // heteroscedastic φ priors
+  log_phi0 ~ normal(log(20), 1);     // centre near φ ≈ 20
+  beta_phi ~ normal(0, 0.5);         // shrink towards homoscedastic
 
-  // ---- parallel log‑likelihood -------------------------------
+  // likelihood (parallel)
   target += reduce_sum(
               partial_sum_beta,
               to_array_1d(y), 16,
               t, k, m, delta, gamma, rho, mu0,
-              A_sin, B_cos, phi,
+              A_sin, B_cos,
+              log_phi0, beta_phi,
               num_changepoints, s,
               num_seasons, n_harmonics, period);
 }
