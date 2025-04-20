@@ -159,20 +159,3 @@ https://github.com/halsted312/murphet
 ```
 
 ---
-
-### Embedding the images
-
-Your repo already contains  
-`docs/figs/Hotel_A_holdout.png`, `retail_IR_holdout.png`, `retail_diag.png`.  
-GitHub renders them automatically in the README.  
-If you ever need different widths:
-
-```html
-<img src="docs/figs/retail_IR_holdout.png" width="85%">
-```
-
-Happy forecasting! 🚀
-```
-
-Just overwrite your existing `README.md` with the text above, commit, and push.
-The three PNGs under `docs/figs/` will appear exactly where the markdown references them.
