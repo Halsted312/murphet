@@ -78,7 +78,7 @@ fcst     = mod.predict(future_t)
 
 ## 4 · Model Architecture
 
-![Murphet Model Architecture](docs/figs/murphet_diagram.svg)
+<img src="docs/figs/murphet_diagram.svg" alt="Murphet Model Architecture" width="50%">
 
 Murphet combines the best of structural time series modeling with modern Bayesian methods:
 
@@ -92,11 +92,11 @@ Murphet combines the best of structural time series modeling with modern Bayesia
 
 ### Advanced Features
 
-| Feature | Implementation | Business Impact |
-|---------|----------------|----------------|
-| **AR(1)** latent error | `real<lower=-1,upper=1> rho; real mu0;` + update in `partial_sum_*` | Catch slow-moving market trends |
-| **Heteroscedastic precision** | `phi_i = exp(log_phi0 - beta_phi*abs(mu_det));` (Beta) / `sigma_i = exp(log_sigma0 + beta_sigma*abs(mu_det));` (Gaussian) | More accurate risk assessment |
-| **Heavy-tail option** | `student_t_lpdf(y | ν, μ, σᵢ)` with `ν ~ Exp(1/30)` | Robustness to outliers and shocks |
+| Feature | Implementation                                                                                                            | Business Impact                   |
+|---------|---------------------------------------------------------------------------------------------------------------------------|-----------------------------------|
+| **AR(1)** latent error | `real<lower=-1,upper=1> rho; real mu0;` + update in `partial_sum_*`                                                       | Catch slow-moving market trends   |
+| **Heteroscedastic precision** | `phi_i = exp(log_phi0 - beta_phi*abs(mu_det));` (Beta) / `sigma_i = exp(log_sigma0 + beta_sigma*abs(mu_det));` (Gaussian) | More accurate risk assessment     |
+| **Heavy-tail option** | `student_t_lpdf(y \ ν, μ, σᵢ)` with `ν ~ Exp(1/30)`                                                                       | Robustness to outliers and shocks |
 
 ---
 
