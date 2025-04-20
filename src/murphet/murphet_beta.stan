@@ -89,7 +89,7 @@ data {
   real<lower=0>             season_scale;
 }
 
-// ───────────────────── parameters  ───────────────────────────
+// ───────────────────── parameters  ────────────────────────
 parameters {
   // trend
   real k;
@@ -105,9 +105,9 @@ parameters {
   vector[total_harmonics] A_sin;
   vector[total_harmonics] B_cos;
 
-  // heteroscedastic precision
-  real log_phi0;            // unconstrained
-  real<lower=0> beta_phi;   // strength (0 = homoscedastic)
+  // heteroscedastic precision  (FIX‑SET 6–lower bound 1e‑6)
+  real log_phi0;
+  real<lower=1e-6> beta_phi;
 }
 
 // ───────────────────────── model  ────────────────────────────

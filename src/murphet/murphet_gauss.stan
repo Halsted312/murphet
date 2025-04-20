@@ -101,7 +101,7 @@ parameters {
 
   // heteroscedastic scale hyper‑params
   real log_sigma0;
-  real<lower=0> beta_sigma;
+  real<lower=1e-6> beta_sigma;
 
   // heavy‑tail dof
   real<lower=2> nu;
