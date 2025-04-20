@@ -5,27 +5,82 @@ build-backend = "setuptools.build_meta"
 [project]
 name            = "murphet"
 version         = "1.1.0"
-description     = "A Bayesian time-series model for churn rates with changepoints and seasonality"
-readme          = "README.md"
+description     = "Bayesian time‑series model with Beta/Gaussian heads, smooth changepoints and seasonality"
+readme          = { file = "README.md", content-type = "text/markdown" }   # ← MIME helps PyPI render correctly
 requires-python = ">=3.8"
 license         = { text = "MIT" }
 
-authors = [{ name = "Stephen Murphy", email = "stephenjmurph@gmail.com" }]
+authors = [
+  { name = "Stephen Murphy", email = "stephenjmurph@gmail.com" }
+]
 
-urls = { Homepage = "https://www.murphet.com",  Repository = "https://github.com/halsted312/murphet" }
+# ---------- NEW: Trove classifiers (show up as filters on PyPI) ----------
+classifiers = [
+  # maturity / intended audience
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
+  "Intended Audience :: Science/Research",
+  "Topic :: Scientific/Engineering :: Information Analysis",
+  "Topic :: Software Development :: Libraries :: Python Modules",
+
+  # license & language
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.9",   # list the versions you test on
+  "Programming Language :: Python :: 3.10",
+
+  # frameworks / domains
+  "Framework :: Matplotlib",                 # optional but helps search
+  "Framework :: Jupyter",
+  "Topic :: Scientific/Engineering :: Mathematics",
+  "Topic :: Utilities"
+]
+
+# ---------- NEW: searchable keywords (comma‑separated) ----------
+keywords = [
+  "prophet",
+  "time series",
+  "bayesian forecasting",
+  "beta regression",
+  "churn modelling",
+  "seasonality",
+  "changepoint detection",
+  "stan",
+  "churn rates",
+  "probability forecasting",
+  "stock price changes",
+  "murphet",
+  "forecasting",
+  "prediction"
+]
+
+# ---------- useful project links ----------
+urls = {  Homepage   = "https://murphet.com",   Repository = "https://github.com/halsted312/murphet",   "Issue Tracker" = "https://github.com/halsted312/murphet/issues",   Documentation   = "https://murphet.com/docs"}
 
 dependencies = [
   "cmdstanpy>=1.1.0",
-  "numpy>=1.22"
+  "numpy>=1.22",
+  "pandas>=1.5",
+  "scipy>=1.9"
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=7", "build", "black", "pre-commit"]
+dev   = ["pytest>=7", "build", "black", "pre-commit"]
+plot  = ["matplotlib>=3.7", "seaborn>=0.13"]
+extra = ["optuna>=3", "prophet>=1.1"]
 
-[tool.setuptools]                  #  ← matches setup.py
+# --------------------------------------------------------------------
+# setuptools‑specific configuration
+[tool.setuptools]
 package-dir = { "" = "src" }
 packages    = ["murphet"]
 include-package-data = true
+
+[tool.setuptools.package-data]
+# ship example notebooks & Stan models inside the sdist/wheel
+"murphet" = ["*.stan"]
+"docs.fig" = ["docs/figs/*.png"]
 
 [tool.pytest.ini_options]
 testpaths    = ["tests"]
