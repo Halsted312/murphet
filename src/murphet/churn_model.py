@@ -2,24 +2,23 @@
 Murphet – multi‑season time‑series model (Prophet‑compatible core)
 ------------------------------------------------------------------
   · optional Gaussian *or* Beta likelihood
-  · piece‑wise‑linear trend  (+ CPs ≈ Prophet)
-  · weak Normal seasonal priors (σ ≈ 10)
+  · piece‑wise‑linear trend   (+ smooth CPs  ≈ Prophet)
+  · weak Normal seasonal priors (σ≈10)       – no horseshoe
 """
 from __future__ import annotations
 import os, warnings, multiprocessing as _mp
 from typing import Sequence, Literal, overload
-
 import numpy as np
 from scipy.special import expit
 from cmdstanpy import CmdStanModel, CmdStanMCMC, CmdStanMLE, CmdStanVB, CmdStanGQ
 
 # ────────────────────────────────────────────────────────────────
-# 0)  compile‑once Stan cache      – pick file by likelihood
+# 0)  compile‑once Stan cache  (one exe per likelihood)
 # ────────────────────────────────────────────────────────────────
-_DIR = os.path.dirname(os.path.abspath(__file__))
-_STAN_BETA  = os.path.join(_DIR, "murphet_beta.stan")
-_STAN_GAUSS = os.path.join(_DIR, "murphet_gauss.stan")
-_COMPILED: dict[str, CmdStanModel] = {}          # keyed by "beta"/"gaussian"
+_DIR         = os.path.dirname(os.path.abspath(__file__))
+_STAN_BETA   = os.path.join(_DIR, "murphet_beta.stan")
+_STAN_GAUSS  = os.path.join(_DIR, "murphet_gauss.stan")
+_COMPILED: dict[str, CmdStanModel] = {}          # key ∈ {"beta","gaussian"}
 
 
 def _get_model(kind: Literal["beta", "gaussian"]) -> CmdStanModel:
@@ -30,7 +29,6 @@ def _get_model(kind: Literal["beta", "gaussian"]) -> CmdStanModel:
         )
     return _COMPILED[kind]
 
-
 # ────────────────────────────────────────────────────────────────
 # 1)  tiny helper – FFT periodogram (unchanged)
 # ────────────────────────────────────────────────────────────────
@@ -39,28 +37,25 @@ def _suggest_periods(y: np.ndarray,
                      max_period: int = 365) -> list[float]:
     if y.size < 8:
         return []
-    power = np.abs(np.fft.rfft(y - y.mean()))**2
-    freqs = np.fft.rfftfreq(y.size, d=1.0)
-    idx   = np.argsort(power[1:])[::-1] + 1
+    pwr   = np.abs(np.fft.rfft(y - y.mean()))**2
+    freqs = np.fft.rfftfreq(y.size, 1.0)
+    idx   = np.argsort(pwr[1:])[::-1] + 1
     out: list[float] = []
     for i in idx:
         if freqs[i] == 0:
             continue
-        p = 1 / freqs[i]
-        if p <= max_period:
-            out.append(float(p))
+        prd = 1 / freqs[i]
+        if prd <= max_period:
+            out.append(float(prd))
             if len(out) >= top_n:
                 break
     return out
 
-
 # ────────────────────────────────────────────────────────────────
-# 2)  Predictor façade  (posterior / MAP means)
+# 2)  Predictor façade (posterior / MAP means)
 # ────────────────────────────────────────────────────────────────
 class ChurnProphetModel:
-    """
-    Fast vectorised predictions from posterior‑mean parameters.
-    """
+    """Fast vectorised predictor (posterior‑mean parameters)."""
 
     def __init__(self,
                  fit: CmdStanMCMC | CmdStanMLE | CmdStanVB | CmdStanGQ,
@@ -68,57 +63,60 @@ class ChurnProphetModel:
                  periods: list[float],
                  n_harm: list[int],
                  likelihood: Literal["beta", "gaussian"]):
-        self.lik          = likelihood
-        self.changepoints = changepoints
-        self.periods      = periods
-        self.n_harm       = n_harm
-        self._H           = sum(n_harm)
+        self.lik      = likelihood
+        self.s        = changepoints
+        self.periods  = periods
+        self.n_harm   = n_harm
+        self._H       = sum(n_harm)
 
-        get = lambda v: np.mean(fit.stan_variable(v), axis=0) if hasattr(fit, "stan_variable") \
-                        else fit.optimized_params_dict[v]
+        # ------- helper that works for MAP (scalar) & MCMC (array) ----------
+        def _mean(var: str):
+            raw = fit.stan_variable(var) if hasattr(fit, "stan_variable") \
+                  else fit.optimized_params_dict[var]
+            arr = np.asarray(raw)
+            return arr.mean(axis=0) if arr.ndim else float(arr)
 
-        self._k      = get("k")
-        self._m      = get("m")
-        self._gamma  = get("gamma")
-        self._delta  = get("delta") if "delta" in fit.metadata.stan_vars else np.zeros(0)
-        self._A      = get("A_sin")
-        self._B      = get("B_cos")
-        self._sigma  = get("sigma") if likelihood == "gaussian" else None  # only Gauss head
+        has = lambda v: hasattr(fit, "metadata") and v in fit.metadata.stan_vars
+
+        self._k      = _mean("k")
+        self._m      = _mean("m")
+        self._gamma  = _mean("gamma")
+        self._delta  = _mean("delta") if has("delta") else np.zeros(0)
+        self._A      = _mean("A_sin")
+        self._B      = _mean("B_cos")
+        self._sigma  = _mean("sigma") if likelihood == "gaussian" and has("sigma") else None
         self.fit     = fit
 
     # ------------------------------------------------------------------
     def predict(self,
                 t_new: Sequence[float] | np.ndarray,
                 method: Literal["mean_params"] = "mean_params") -> np.ndarray:
-
         if method != "mean_params":
             raise NotImplementedError
+
         t_new = np.asarray(t_new, float)
         out   = np.empty_like(t_new)
 
         for j, t in enumerate(t_new):
-            # piece‑wise‑linear trend (Prophet style)
-            cp   = np.sum(self._delta * expit(self._gamma * (t - self.changepoints))
-                          ) if self._delta.size else 0.0
-            mu_t = self._k * t + self._m + cp      # <- **no quadratic**
+            # piece‑wise‑linear trend
+            cp = np.sum(self._delta * expit(self._gamma * (t - self.s))
+                        ) if self._delta.size else 0.0
+            mu = self._k * t + self._m + cp
 
-            # Fourier season blocks
-            pos, seas = 0, 0.0
-            for p, h in zip(self.periods, self.n_harm):
-                tau = t % p
-                for k in range(1, h + 1):
-                    ang  = 2 * np.pi * k * tau / p
-                    seas += self._A[pos]*np.sin(ang) + self._B[pos]*np.cos(ang)
-                    pos  += 1
-            mu_t += seas
+            # additive Fourier seasonality
+            pos = 0
+            for P, H in zip(self.periods, self.n_harm):
+                tau = t % P
+                for k in range(1, H + 1):
+                    ang = 2 * np.pi * k * tau / P
+                    mu += self._A[pos] * np.sin(ang) + self._B[pos] * np.cos(ang)
+                    pos += 1
 
-            out[j] = expit(mu_t) if self.lik == "beta" else mu_t
-
+            out[j] = expit(mu) if self.lik == "beta" else mu
         return out
 
-
 # ────────────────────────────────────────────────────────────────
-# 3)  public fit function  (only the *signature* below may differ)
+# 3)  public fit function
 # ────────────────────────────────────────────────────────────────
 @overload
 def fit_churn_model(*,
@@ -126,24 +124,23 @@ def fit_churn_model(*,
                     y: Sequence[float] | np.ndarray,
                     **kwargs) -> ChurnProphetModel: ...
 
-
 def fit_churn_model(
         *,
         t: Sequence[float] | np.ndarray,
         y: Sequence[float] | np.ndarray,
         likelihood: Literal["beta", "gaussian"] = "beta",
-        # changepoints
+        # changepoints --------------------------------------------------
         n_changepoints: int | None = None,
         changepoints: Sequence[float] | np.ndarray | None = None,
-        # seasonality
+        # seasonality ---------------------------------------------------
         periods: float | Sequence[float] = 12.0,
         num_harmonics: int | Sequence[int] = 3,
         auto_detect: bool = False,
-        season_scale: float = 1.0,          # weak N(0,10) → scale=1
-        # trend priors
+        season_scale: float = 1.0,
+        # trend priors --------------------------------------------------
         delta_scale: float = 0.05,
         gamma_scale: float = 3.0,
-        # inference
+        # inference -----------------------------------------------------
         inference: Literal["map", "advi", "nuts"] = "map",
         chains: int = 2,
         iter: int = 4000,
@@ -153,15 +150,14 @@ def fit_churn_model(
         threads_per_chain: int | None = None,
         seed: int | None = None,
 ) -> ChurnProphetModel:
-    # ── 0) input / range checks ──────────────────────────────────
+
+    # ── checks & data coercion ─────────────────────────────────────
     t = np.asarray(t, float)
     y = np.asarray(y, float)
-
     if likelihood == "beta" and (np.any(y <= 0) or np.any(y >= 1)):
-        raise ValueError("Beta head requires 0 < y < 1. "
-                         "For un‑bound ratios pick likelihood='gaussian'.")
+        raise ValueError("Beta likelihood requires 0 < y < 1.")
 
-    # ── 1) seasonality coercion ──────────────────────────────────
+    # ── seasonality lists ─────────────────────────────────────────
     if auto_detect and (periods is None or not periods):
         periods = _suggest_periods(y) or [12.0]
     periods = [float(p) for p in (periods if isinstance(periods, (list, tuple, np.ndarray))
@@ -170,8 +166,9 @@ def fit_churn_model(
         num_harmonics = [int(num_harmonics)] * len(periods)
     elif len(num_harmonics) != len(periods):
         raise ValueError("len(num_harmonics) must match len(periods)")
+    num_harmonics = [int(h) for h in num_harmonics]
 
-    # ── 2) changepoints  (Prophet heuristic) ─────────────────────
+    # ── changepoints (Prophet heuristic) ──────────────────────────
     if changepoints is None:
         if n_changepoints is None:
             n_changepoints = max(1, int(0.2 * len(t)))
@@ -181,11 +178,11 @@ def fit_churn_model(
         changepoints = np.sort(np.asarray(changepoints, float))
         n_changepoints = changepoints.size
 
-    # ── 3) threading ─────────────────────────────────────────────
+    # ── threading & env var ───────────────────────────────────────
     threads_per_chain = threads_per_chain or min(_mp.cpu_count(), 4)
     os.environ["STAN_NUM_THREADS"] = str(threads_per_chain)
 
-    # ── 4) Stan data dict ────────────────────────────────────────
+    # ── Stan data dict ────────────────────────────────────────────
     stan_data = dict(
         N=len(y), y=y, t=t,
         num_changepoints=n_changepoints, s=changepoints,
@@ -195,9 +192,9 @@ def fit_churn_model(
         season_scale=season_scale,
     )
 
-    # ── 5) choose & fit backend ──────────────────────────────────
     model = _get_model(likelihood)
 
+    # ── inference routes ─────────────────────────────────────────
     if inference == "map":
         fit = model.optimize(data=stan_data, algorithm="lbfgs",
                              iter=10000, seed=seed)
@@ -211,7 +208,7 @@ def fit_churn_model(
             if fit.num_draws < 1:
                 raise RuntimeError
         except Exception:
-            warnings.warn("ADVI failed – falling back to MAP.")
+            warnings.warn("ADVI failed – falling back to MAP.")
             fit = model.optimize(data=stan_data, algorithm="lbfgs",
                                  iter=10000, seed=seed)
 
@@ -221,12 +218,10 @@ def fit_churn_model(
             iter_warmup=warmup, iter_sampling=iter - warmup,
             adapt_delta=adapt_delta, max_treedepth=max_treedepth,
             threads_per_chain=threads_per_chain, seed=seed,
-            show_progress=True,
-        )
+            show_progress=True)
     else:
         raise ValueError("inference must be 'map', 'advi' or 'nuts'.")
 
-    # ── 6) wrap predictor & return ───────────────────────────────
     return ChurnProphetModel(
         fit, changepoints=np.asarray(changepoints, float),
         periods=periods, n_harm=num_harmonics,
