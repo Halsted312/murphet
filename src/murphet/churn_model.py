@@ -1,30 +1,28 @@
 """
-Murphet – multi‑season logistic‑beta model
-======================================================================
-  · Thread‑parallel Stan backend (reduce_sum)
-  · Optional auto‑detection of dominant periods via FFT
-  · Fast MAP / ADVI for HPO + full NUTS for final fit
+Murphet – multi‑season logistic‑beta model  (parallel Stan backend)
 
 Public API
 ----------
     fit_churn_model(...)          ->  ChurnProphetModel
-    ChurnProphetModel.predict(...) (vectorised, fast)
+    ChurnProphetModel.predict(...)
 """
 from __future__ import annotations
 
-import os, warnings, multiprocessing as _mp
+import os
+import warnings
+import multiprocessing as _mp
 from typing import Sequence, Literal, overload
+
 import numpy as np
 from scipy.special import expit
-from cmdstanpy import (
-    CmdStanModel, CmdStanMCMC, CmdStanMLE, CmdStanVB, CmdStanGQ
-)
+from cmdstanpy import (CmdStanModel, CmdStanMCMC,
+                       CmdStanMLE, CmdStanVB, CmdStanGQ)
 
 # ────────────────────────────────────────────────────────────────
-# 0)  Compile‑once Stan model cache
+# 0)  compile‑once Stan cache
 # ────────────────────────────────────────────────────────────────
-_DIR        = os.path.dirname(os.path.abspath(__file__))
-_STAN_FILE  = os.path.join(_DIR, "murphet_model.stan")
+_DIR = os.path.dirname(os.path.abspath(__file__))
+_STAN_FILE = os.path.join(_DIR, "murphet_model.stan")
 _COMPILED: CmdStanModel | None = None
 
 
@@ -39,17 +37,16 @@ def _get_model() -> CmdStanModel:
 
 
 # ────────────────────────────────────────────────────────────────
-# 1)  FFT helper – suggest dominant periods
+# 1)  quick FFT period suggestion (unchanged)
 # ────────────────────────────────────────────────────────────────
 def _suggest_periods(y: np.ndarray,
                      top_n: int = 2,
                      max_period: int = 365) -> list[float]:
-    """Return up to *top_n* candidate periods (coarse)."""
     if y.size < 8:
         return []
-    power = np.abs(np.fft.rfft(y - y.mean()))**2
+    power = np.abs(np.fft.rfft(y - y.mean())) ** 2
     freqs = np.fft.rfftfreq(y.size, d=1.0)
-    idx   = np.argsort(power[1:])[::-1] + 1            # skip DC
+    idx = np.argsort(power[1:])[::-1] + 1  # skip DC
     out: list[float] = []
     for i in idx:
         if freqs[i] == 0:
@@ -69,16 +66,16 @@ class ChurnProphetModel:
     """Light‑weight predictor using mean posterior / MAP params."""
 
     def __init__(
-        self,
-        fit_result: CmdStanMCMC | CmdStanMLE | CmdStanVB | CmdStanGQ,
-        changepoints: np.ndarray,
-        periods: list[float],
-        num_harmonics: list[int],
+            self,
+            fit_result: CmdStanMCMC | CmdStanMLE | CmdStanVB | CmdStanGQ,
+            changepoints: np.ndarray,
+            periods: list[float],
+            num_harmonics: list[int],
     ):
         self.changepoints = changepoints
-        self.periods      = periods
-        self.num_harm     = num_harmonics
-        self._tot_harm    = sum(num_harmonics)
+        self.periods = periods
+        self.num_harm = num_harmonics
+        self._tot_harm = sum(num_harmonics)
 
         # helper
         has_var = lambda v: v in fit_result.metadata.stan_vars
@@ -87,19 +84,19 @@ class ChurnProphetModel:
         if isinstance(fit_result, (CmdStanMCMC, CmdStanVB)):
             m = lambda v: np.mean(fit_result.stan_variable(v), axis=0)
             self._k, self._m, self._q = m("k"), m("m"), m("q")
-            self._gamma               = m("gamma")
-            self._A, self._B          = m("A_sin"), m("B_cos")
+            self._gamma = m("gamma")
+            self._A, self._B = m("A_sin"), m("B_cos")
             self._delta = m("delta") if has_var("delta") else np.zeros(0)
         elif isinstance(fit_result, CmdStanMLE):
-            p  = fit_result.optimized_params_dict
+            p = fit_result.optimized_params_dict
             self._k, self._m, self._q = p["k"], p["m"], p["q"]
-            self._gamma               = p["gamma"]
-            self._delta               = (
-                np.array([p[f"delta[{i+1}]"] for i in range(len(changepoints))])
+            self._gamma = p["gamma"]
+            self._delta = (
+                np.array([p[f"delta[{i + 1}]"] for i in range(len(changepoints))])
                 if changepoints.size else np.zeros(0)
             )
-            self._A = np.array([p[f"A_sin[{i+1}]"] for i in range(self._tot_harm)])
-            self._B = np.array([p[f"B_cos[{i+1}]"] for i in range(self._tot_harm)])
+            self._A = np.array([p[f"A_sin[{i + 1}]"] for i in range(self._tot_harm)])
+            self._B = np.array([p[f"B_cos[{i + 1}]"] for i in range(self._tot_harm)])
         else:
             raise TypeError("Unsupported CmdStan result type.")
         self.fit_result = fit_result
@@ -108,29 +105,29 @@ class ChurnProphetModel:
     def predict(self,
                 t_new: Sequence[float] | np.ndarray,
                 method: Literal["mean_params"] = "mean_params"
-               ) -> np.ndarray:
+                ) -> np.ndarray:
         if method != "mean_params":
             raise NotImplementedError
         t_new = np.asarray(t_new, float)
-        out   = np.empty_like(t_new)
+        out = np.empty_like(t_new)
         for j, t in enumerate(t_new):
-            cp = (np.sum(self._delta * expit(self._gamma*(t - self.changepoints)))
+            cp = (np.sum(self._delta * expit(self._gamma * (t - self.changepoints)))
                   if self._delta.size else 0.0)
-            trend = self._k*t + self._m + self._q*t**2 + cp
+            trend = self._k * t + self._m + self._q * t ** 2 + cp
             pos, seas = 0, 0.0
             for p, h in zip(self.periods, self.num_harm):
                 tmod = t % p
-                for k in range(1, h+1):
-                    ang  = 2*np.pi*k*tmod/p
-                    seas += self._A[pos]*np.sin(ang) + self._B[pos]*np.cos(ang)
-                    pos  += 1
-            seas = np.clip(seas, -5.0, 5.0)        # guard against blow‑ups
+                for k in range(1, h + 1):
+                    ang = 2 * np.pi * k * tmod / p
+                    seas += self._A[pos] * np.sin(ang) + self._B[pos] * np.cos(ang)
+                    pos += 1
+            seas = np.clip(seas, -5.0, 5.0)  # guard against blow‑ups
             out[j] = expit(trend + seas)
         return out
 
 
 # ────────────────────────────────────────────────────────────────
-# 3)  Public fit function
+# 3)  public fit function  (***signature changes below***)
 # ────────────────────────────────────────────────────────────────
 @overload
 def fit_churn_model(*,
@@ -140,29 +137,30 @@ def fit_churn_model(*,
 
 
 def fit_churn_model(
-    *,
-    t: Sequence[float] | np.ndarray,
-    y: Sequence[float] | np.ndarray,
-    # changepoints
-    n_changepoints: int | None = None,
-    changepoints: Sequence[float] | np.ndarray | None = None,
-    # seasonality
-    periods: float | Sequence[float] = 12.0,
-    num_harmonics: int | Sequence[int] = 3,
-    auto_detect: bool = False,
-    season_scale: float = 0.15,           # NEW  ← λ_seas
-    # priors / inference
-    delta_scale: float = 0.05,
-    inference: Literal["nuts", "map", "advi"] = "nuts",
-    chains: int = 4,
-    iter: int = 2000,
-    warmup: int = 1000,
-    adapt_delta: float = 0.95,
-    max_treedepth: int = 12,
-    threads_per_chain: int | None = None,
-    seed: int | None = None,
+        *,
+        t: Sequence[float] | np.ndarray,
+        y: Sequence[float] | np.ndarray,
+        # changepoints -------------------------------------------------
+        n_changepoints: int | None = None,
+        changepoints: Sequence[float] | np.ndarray | None = None,
+        # seasonality  -------------------------------------------------
+        periods: float | Sequence[float] = 12.0,
+        num_harmonics: int | Sequence[int] = 3,
+        auto_detect: bool = False,
+        season_scale: float = 0.15,  # NEW (τ prior centre)
+        # trend priors  ------------------------------------------------
+        delta_scale: float = 0.05,
+        gamma_scale: float = 3.0,
+        # inference ----------------------------------------------------
+        inference: Literal["nuts", "map", "advi"] = "nuts",
+        chains: int = 4,
+        iter: int = 2000,
+        warmup: int = 1000,
+        adapt_delta: float = 0.95,
+        max_treedepth: int = 12,
+        threads_per_chain: int | None = None,
+        seed: int | None = None,
 ) -> ChurnProphetModel:
-
     # ---------- input validation ----------------------------------
     t = np.asarray(t, float)
     y = np.asarray(y, float)
@@ -184,8 +182,8 @@ def fit_churn_model(
     # ---------- changepoints -------------------------------------
     if changepoints is None:
         if n_changepoints is None:
-            n_changepoints = max(1, int(round(0.2*len(t))))
-        qs = np.linspace(0.1, 0.9, n_changepoints+2)[1:-1]
+            n_changepoints = max(1, int(round(0.2 * len(t))))
+        qs = np.linspace(0.1, 0.9, n_changepoints + 2)[1:-1]
         changepoints = np.quantile(t, qs)
     else:
         changepoints = np.sort(np.asarray(changepoints, float))
@@ -203,11 +201,12 @@ def fit_churn_model(
         N=len(y), y=y, t=t,
         num_changepoints=n_changepoints, s=changepoints,
         delta_scale=delta_scale,
+        gamma_scale=gamma_scale,
         num_seasons=len(periods),
-        n_harmonics=num_harmonics,            # new key (matches Stan)
+        n_harmonics=num_harmonics,
         period=periods,
         total_harmonics=int(sum(num_harmonics)),
-        season_scale=season_scale,            # passes λ_seas to Stan
+        season_scale=season_scale,
     )
 
     model = _get_model()

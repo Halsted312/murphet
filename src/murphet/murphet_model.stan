@@ -54,13 +54,14 @@ data {
   int<lower=0>   num_changepoints;
   vector[num_changepoints] s;
   real<lower=0> delta_scale;
+  real<lower=0> gamma_scale;
 
   // Seasonality meta
   int<lower=1>              num_seasons;
   array[num_seasons] int<lower=1>  n_harmonics;
   array[num_seasons] real<lower=0> period;
   int<lower=1>              total_harmonics;
-  real<lower=0>             season_scale;   // NEW: passed from python (λ_seas)
+  real<lower=0>             season_scale;
 }
 
 parameters {
@@ -91,7 +92,7 @@ model {
   m          ~ normal(logit(0.06), 0.5);
   q          ~ normal(0, 0.01);
   delta      ~ double_exponential(0, delta_scale);
-  gamma      ~ gamma(3, 1);
+  gamma      ~ gamma(3, 1 / gamma_scale);
 
   // Horseshoe‑like shrinkage for each Fourier coeff
   sigma_h    ~ cauchy(0, 1);

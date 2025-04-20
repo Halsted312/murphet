@@ -41,7 +41,7 @@ HOLD_OUT_MO     = 12          # final test window
 LB_LAGS         = 12
 SEED            = 42
 TRIALS_MUR      = 15
-TRIALS_PROP     = 15
+TRIALS_PROP     = 4
 
 # ──────────────────────── load data ────────────────────────────
 df = (pd.read_csv(CSV_PATH, parse_dates=["ds"])
@@ -59,31 +59,50 @@ fold_starts  = list(range(first_test,
 if not fold_starts:
     raise SystemExit("Dataset too short for this CV setup.")
 
-# ──────────────── Optuna search spaces ─────────────────────────
+# ──────────── Optuna search space (improved) ────────────
 def mur_cfg(trial):
-    # seasonal structure ----------------------------------------------------
+    # ── 1) seasonal structure  ───────────────────────────
     periods, harms = [12.0], [trial.suggest_int("harm_year", 1, 4)]
-    if trial.suggest_categorical("add_half", [0, 1]):
-        periods.append(6.0)
-        harms.append(trial.suggest_int("harm_half", 1, 3))
-    if trial.suggest_categorical("add_qtr", [0, 1]):
-        periods.append(3.0)
-        harms.append(trial.suggest_int("harm_qtr", 1, 3))
 
-    return dict(
-        periods            = periods,
-        num_harmonics      = harms,
-        n_changepoints     = trial.suggest_int("n_cp", 0, 6),
-        delta_scale        = trial.suggest_float("delta", 0.01, 0.22, log=True),
-        # NEW global prior on seasonal size
-        season_scale       = trial.suggest_float("season_scale", 0.1, 1.5),
-        inference          = "map",          # MAP only
-        chains             = 2,
-        iter               = 3000,
-        warmup             = 0,
-        threads_per_chain  = 16,
-        seed               = SEED,
+    if trial.suggest_categorical("add_half",   [0, 1]):
+        periods.append(6.0)
+        harms.append(trial.suggest_int("harm_half", 1, 4))
+
+    if trial.suggest_categorical("add_qtr",    [0, 1]):
+        periods.append(3.0)
+        harms.append(trial.suggest_int("harm_qtr",  1, 4))
+
+    # ── 2) trend‑flexibility hyper‑params  ───────────────
+    # let Optuna consider up to ~1 CP every 2 years
+    max_cp = 30         # ≈ 16 for 32 years
+    n_cp   = trial.suggest_int("n_cp", 3, max_cp)
+
+    # break magnitudes: 0.005 … 0.4   (much wider)
+    delta  = trial.suggest_float("delta", 0.01, 0.8, log=True)
+
+    # changepoint steepness γ  (small ⇒ gentler bends)
+    gamma  = trial.suggest_float("gamma", 1.0, 15.0)
+
+    cfg = dict(
+        # seasonality
+        periods           = periods,
+        num_harmonics     = harms,
+        # trend
+        n_changepoints    = n_cp,
+        delta_scale       = delta,
+        gamma_scale       = gamma,          # ← NEW (see note below)
+        # priors on season amplitude
+        season_scale      = trial.suggest_float("season_scale", 0.1, 2.0),
+        # inference (fast)
+        inference         = "map",
+        chains            = 2,
+        iter              = 4000,
+        warmup            = 0,
+        threads_per_chain = 16,
+        seed              = SEED,
     )
+    return cfg
+
 
 def prop_cfg(trial):
     return dict(
