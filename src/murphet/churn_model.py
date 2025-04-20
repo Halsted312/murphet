@@ -685,7 +685,7 @@ def fit_churn_model(
     # -----------------------------------------------------------------
     # 4·  inference routes
     # -----------------------------------------------------------------
-    data_used = stan_data  # ← points to the dict currently sent to Stan
+    data_used = stan_data  # ← keep a pointer to the dict we hand to Stan
 
     # ------------------------------------------------------------------#
     #  MAP  (primary)                                                   #
@@ -754,7 +754,7 @@ def fit_churn_model(
     #  ADVI  (variational)                                              #
     # ------------------------------------------------------------------#
     elif inference == "advi":
-        try:  # ── primary attempt ───────────
+        try:
             data_used = stan_data
             with SuppressOutput():
                 fit = model.variational(
@@ -776,7 +776,6 @@ def fit_churn_model(
                 f"ADVI failed: {extract_key_error(err)}.  Switching to MAP fallback."
             )
 
-            # -------- ADVI → MAP rescue --------------------------------
             data_used = stan_data_safe = stan_data.copy()
             data_used["delta_scale"] = min(stan_data["delta_scale"], 0.30)
             data_used["gamma_scale"] = max(min(stan_data["gamma_scale"], 8.0), 3.0)
@@ -823,7 +822,7 @@ def fit_churn_model(
     elif inference == "nuts":
         try:  # ── primary attempt ───────────
             data_used = stan_data
-            with SuppressOutput(stdout=True, stderr=True):
+            with SuppressOutput(suppress_stdout=True, suppress_stderr=True):
                 fit = model.sample(
                     data=data_used,
                     chains=chains,
@@ -867,7 +866,6 @@ def fit_churn_model(
                     "Trying MAP as a last resort."
                 )
 
-                # -------- ADVI → MAP rescue ----------------------------
                 try:
                     data_used = stan_data_safe = stan_data.copy()
                     with SuppressOutput():

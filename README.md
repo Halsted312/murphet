@@ -1,6 +1,6 @@
 # 📈 Murphet — Making Prophet a Beta (Pun Intended!)
 
-[![PyPI version](https://img.shields.io/badge/pypi-v1.5.2-blue)](https://pypi.org/project/murphet/)
+[![PyPI version](https://img.shields.io/badge/pypi-v1.5.3-blue)](https://pypi.org/project/murphet/)
 [![Python](https://img.shields.io/badge/python-3.8%2B-blue)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
