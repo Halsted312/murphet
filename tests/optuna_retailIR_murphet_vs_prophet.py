@@ -36,14 +36,14 @@ mape  = lambda a, f: 100*np.mean(np.abs((a-f)/a))
 ROOT            = pathlib.Path(__file__).resolve().parent.parent
 CSV_PATH        = ROOT / "data" / "RETAILIRNSA.csv"
 
-INIT_YEARS      = 8
+INIT_YEARS      = 10
 CV_HORIZON      = 6          # months per fold
 CV_STEP         = 3
-HOLD_OUT_MO     = 12         # final test window
+HOLD_OUT_MO     = 18         # final test window
 LB_LAGS         = 12
 SEED            = 42
 TRIALS_MUR      = 20
-TRIALS_PROP     = 4
+TRIALS_PROP     = 20
 
 # ───────────────────── load & prep data ────────────────────
 df = (pd.read_csv(CSV_PATH, parse_dates=["ds"])

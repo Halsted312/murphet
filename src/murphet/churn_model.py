@@ -11,6 +11,12 @@ from typing import Sequence, Literal, overload
 import numpy as np
 from scipy.special import expit
 from cmdstanpy import CmdStanModel, CmdStanMCMC, CmdStanMLE, CmdStanVB, CmdStanGQ
+import warnings
+warnings.filterwarnings(
+    "ignore",
+    message=r"The default behavior of CmdStanMLE\.stan_variable\(\) will change",
+    category=UserWarning,
+)
 
 # ────────────────────────────────────────────────────────────────
 # 0)  compile‑once Stan cache  (one exe per likelihood)
@@ -72,20 +78,26 @@ class ChurnProphetModel:
         self._H       = sum(n_harm)
 
         # ---------------- helper extractors -----------------------
+        is_mle = isinstance(fit, CmdStanMLE)  # <── add
+
         def _scalar(var: str) -> float:
-            raw = fit.stan_variable(var) if hasattr(fit, "stan_variable") \
-                  else fit.optimized_params_dict[var]
-            return float(np.asarray(raw).mean())
+            if is_mle:  # MLE path  → use dict
+                return float(fit.optimized_params_dict[var])
+            arr = np.asarray(fit.stan_variable(var))  # MCMC/VB
+            return float(arr.mean())
 
         def _vector(var: str) -> np.ndarray:
-            raw = fit.stan_variable(var) if hasattr(fit, "stan_variable") \
-                  else fit.optimized_params_dict[var]
-            arr = np.asarray(raw, float)
-            if arr.ndim == 2:                     # draws × dim
-                arr = arr.mean(axis=0)
-            elif arr.ndim == 0:                   # scalar → len‑1 vector
-                arr = np.array([float(arr)])
-            return arr.astype(float)
+            if is_mle:
+                # vec variables are already 1‑based in the dict
+                if var in fit.optimized_params_dict:  # whole vector (e.g. A_sin)
+                    return np.asarray(fit.optimized_params_dict[var], float)
+                # sliced name like "delta": rebuild by index
+                return np.array(
+                    [fit.optimized_params_dict[f"{var}[{i + 1}]"] for i in range(self._H)],
+                    dtype=float,
+                )
+            arr = np.asarray(fit.stan_variable(var), float)
+            return arr.mean(axis=0) if arr.ndim == 2 else arr
 
         has = lambda v: hasattr(fit, "metadata") and v in fit.metadata.stan_vars
 
