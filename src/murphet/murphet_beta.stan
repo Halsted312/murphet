@@ -57,7 +57,9 @@ functions {
       real phi_i = exp(log_phi0 - beta_phi * abs(mu_det));
       // ── Beta likelihood  yᵢ ~ Beta(p·φᵢ, (1‑p)·φᵢ) ───────────
       real p   = inv_logit(mu);
-      lp      += beta_lpdf(y_slice[i] | p * phi_i, (1 - p) * phi_i);
+      real alpha = fmax(p * phi_i, 1e-5);  // Ensure first parameter is positive
+      real beta = fmax((1 - p) * phi_i, 1e-5);  // Ensure second parameter is positive
+      lp += beta_lpdf(y_slice[i] | alpha, beta);
     }
     return lp;
   }

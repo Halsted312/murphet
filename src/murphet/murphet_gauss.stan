@@ -55,7 +55,8 @@ functions {
       lag     = mu;
 
       // ── heteroscedastic σᵢ  (log‑linear in |μ_det|) ────────
-      real sigma_i = exp(log_sigma0 + beta_sigma * abs(mu_det));
+      real sigma_i_raw = exp(log_sigma0 + beta_sigma * abs(mu_det));
+      real sigma_i = fmax(sigma_i_raw, 1e-5);  // Safety check for minimum scale
 
       // ── Student‑t likelihood  (ν → large ⇒ Gaussian) ───────
       lp += student_t_lpdf(y_slice[i] | nu, mu, sigma_i);
@@ -127,7 +128,7 @@ model {
   beta_sigma ~ normal(0, 0.5);    // shrink towards homoscedastic
 
   // priors: Student‑t dof  (fat tails → small ν)
-  nu ~ exponential(1 / 30);       // mode 2, median ≈ 21
+  nu ~ exponential(1 / 30);       // mode 2, median ≈ 21
 
   // parallel likelihood
   target += reduce_sum(

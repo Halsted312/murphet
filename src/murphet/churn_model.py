@@ -139,45 +139,116 @@ class ChurnProphetModel:
 
     # ------------------------------------------------------------------
     def predict(
-        self,
-        t_new: Sequence[float] | np.ndarray,
-        method: Literal["mean_params"] = "mean_params",
+            self,
+            t_new: Sequence[float] | np.ndarray,
+            method: Literal["mean_params", "sample"] = "mean_params",
     ) -> np.ndarray:
+        """
+        Generate predictions for new time points.
 
-        if method != "mean_params":
-            raise NotImplementedError
+        Parameters:
+            t_new: New time points to predict
+            method: Either "mean_params" (use posterior means) or "sample" (draw from posterior)
 
+        Returns:
+            Array of predictions for each time point
+        """
         t_new = np.asarray(t_new, float)
-        out   = np.empty_like(t_new)
 
-        lag_state = self._mu0                        # AR(1) initial state
-        for j, t in enumerate(t_new):
+        # Mean parameters approach (existing implementation)
+        if method == "mean_params":
+            out = np.empty_like(t_new)
+            lag_state = self._mu0  # AR(1) initial state
+            for j, t in enumerate(t_new):
+                # ---- piece‑wise‑linear trend ---------------------------------
+                cp = np.sum(self._delta * expit(self._gamma * (t - self.s))
+                            ) if self._delta.size else 0.0
+                mu = self._k * t + self._m + cp
 
-            # ---- piece‑wise‑linear trend ---------------------------------
-            cp = np.sum(self._delta * expit(self._gamma * (t - self.s))
-                        ) if self._delta.size else 0.0
-            mu = self._k * t + self._m + cp
+                # ---- additive Fourier seasonality ----------------------------
+                pos = 0
+                for P, H in zip(self.periods, self.n_harm):
+                    tau = t % P
+                    for h in range(1, H + 1):
+                        ang = 2 * np.pi * h * tau / P
+                        mu += self._A[pos] * np.sin(ang) + self._B[pos] * np.cos(ang)
+                        pos += 1
 
-            # ---- additive Fourier seasonality ----------------------------
-            pos = 0
-            for P, H in zip(self.periods, self.n_harm):
-                tau = t % P
-                for h in range(1, H + 1):
-                    ang = 2 * np.pi * h * tau / P
-                    mu += self._A[pos] * np.sin(ang) + self._B[pos] * np.cos(ang)
-                    pos += 1
+                # ---- AR(1) disturbance  --------------------------------------
+                mu += self._rho * lag_state
+                lag_state = mu
 
-            # ---- AR(1) disturbance  --------------------------------------
-            mu += self._rho * lag_state
-            lag_state = mu
+                # ---- link function -------------------------------------------
+                out[j] = expit(mu) if self.lik == "beta" else mu
 
-            # ---- link function -------------------------------------------
-            out[j] = expit(mu) if self.lik == "beta" else mu
+            return out
 
-        return out
+        # Sample from posterior approach
+        elif method == "sample":
+            # Verify we have MCMC samples
+            if not isinstance(self.fit, CmdStanMCMC):
+                raise ValueError("Sampling requires NUTS inference (inference='nuts')")
 
+            # Select a random posterior sample
+            n_samples = len(self.fit.stan_variable("k"))
+            sample_idx = np.random.randint(0, n_samples)
 
+            # Extract parameters for this sample
+            k = float(self.fit.stan_variable("k")[sample_idx])
+            m = float(self.fit.stan_variable("m")[sample_idx])
+            gamma = float(self.fit.stan_variable("gamma")[sample_idx])
 
+            # Extract delta (changepoint adjustment) if it exists
+            if self.s.size > 0:
+                delta = self.fit.stan_variable("delta")[sample_idx]
+            else:
+                delta = np.zeros(0)
+
+            # Extract seasonal components
+            A_sin = self.fit.stan_variable("A_sin")[sample_idx]
+            B_cos = self.fit.stan_variable("B_cos")[sample_idx]
+
+            # Extract AR(1) components
+            try:
+                rho = float(self.fit.stan_variable("rho")[sample_idx])
+            except:
+                rho = 0.0
+
+            try:
+                mu0 = float(self.fit.stan_variable("mu0")[sample_idx])
+            except:
+                mu0 = 0.0
+
+            # Generate predictions with this sample
+            out = np.empty_like(t_new)
+            lag_state = mu0  # AR(1) initial state
+
+            for j, t in enumerate(t_new):
+                # ---- piece‑wise‑linear trend ---------------------------------
+                cp = np.sum(delta * expit(gamma * (t - self.s))
+                            ) if delta.size else 0.0
+                mu = k * t + m + cp
+
+                # ---- additive Fourier seasonality ----------------------------
+                pos = 0
+                for P, H in zip(self.periods, self.n_harm):
+                    tau = t % P
+                    for h in range(1, H + 1):
+                        ang = 2 * np.pi * h * tau / P
+                        mu += A_sin[pos] * np.sin(ang) + B_cos[pos] * np.cos(ang)
+                        pos += 1
+
+                # ---- AR(1) disturbance  --------------------------------------
+                mu += rho * lag_state
+                lag_state = mu
+
+                # ---- link function -------------------------------------------
+                out[j] = expit(mu) if self.lik == "beta" else mu
+
+            return out
+
+        else:
+            raise ValueError(f"Unknown method: {method}. Use 'mean_params' or 'sample'")
 # ────────────────────────────────────────────────────────────────
 # 3)  public fit function
 # ────────────────────────────────────────────────────────────────
@@ -212,13 +283,22 @@ def fit_churn_model(
         max_treedepth: int = 12,
         threads_per_chain: int | None = None,
         seed: int | None = None,
+
 ) -> ChurnProphetModel:
 
     # ── checks & data coercion ─────────────────────────────────────
     t = np.asarray(t, float)
     y = np.asarray(y, float)
+
+    # First check if data is completely outside bounds (error condition)
     if likelihood == "beta" and (np.any(y <= 0) or np.any(y >= 1)):
-        raise ValueError("Beta likelihood requires 0 < y < 1.")
+        raise ValueError("Beta likelihood requires 0 < y < 1.")
+
+    # Then add safety margin for beta likelihood
+    if likelihood == "beta":
+        # Add small epsilon to ensure values aren't too close to boundaries
+        epsilon = 1e-5
+        y = np.clip(y, epsilon, 1 - epsilon)
 
     # ── seasonality lists ─────────────────────────────────────────
     if auto_detect and (periods is None or not periods):
