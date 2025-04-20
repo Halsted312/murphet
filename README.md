@@ -86,10 +86,10 @@ fcst     = mod.predict(future_t)
 
 ![Hotel hold-out](docs/figs/Hotel_A_holdout.png)
 
-| Hold-out horizon | RMSE |
-|------------------|------|
-| **Murphet β**    | **0.0908** |
-| Prophet (optimised) | 0.1578 |
+| Hold-out horizon | RMSE       |
+|------------------|------------|
+| **Murphet β**    | **0.0916** |
+| Prophet (optimised) | 0.1159     |
 
 ### 5 b · U.S. Retail Inventories-to-Sales Ratio *(FRED RETAILIRNSA)*
 
