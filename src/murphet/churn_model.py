@@ -52,7 +52,7 @@ def _suggest_periods(y: np.ndarray,
     return out
 
 # ────────────────────────────────────────────────────────────────
-# 2)  Predictor façade (posterior / MAP means)
+# 2)  Predictor façade (posterior / MAP means)   ✅ final version
 # ────────────────────────────────────────────────────────────────
 class ChurnProphetModel:
     """Fast vectorised predictor built from posterior / MAP means."""
@@ -72,49 +72,41 @@ class ChurnProphetModel:
         self._H       = sum(n_harm)
 
         # ---------------- helper extractors -----------------------
-        # works for *both* MAP (scalar) and MCMC / VB (array)
         def _scalar(var: str) -> float:
-            raw = (
-                fit.stan_variable(var)
-                if hasattr(fit, "stan_variable")
-                else fit.optimized_params_dict[var]
-            )
-            arr = np.asarray(raw)
-            return float(arr.mean())  # always collapse to python float
+            raw = fit.stan_variable(var) if hasattr(fit, "stan_variable") \
+                  else fit.optimized_params_dict[var]
+            return float(np.asarray(raw).mean())
 
         def _vector(var: str) -> np.ndarray:
-            raw = (
-                fit.stan_variable(var)
-                if hasattr(fit, "stan_variable")
-                else fit.optimized_params_dict[var]
-            )
+            raw = fit.stan_variable(var) if hasattr(fit, "stan_variable") \
+                  else fit.optimized_params_dict[var]
             arr = np.asarray(raw, float)
-            #   shape (S, H)  → mean over draws
-            if arr.ndim == 2:
+            if arr.ndim == 2:                     # draws × dim
                 arr = arr.mean(axis=0)
-            #   shape ()      → turn scalar into length‑1 vector
-            elif arr.ndim == 0:
-                arr = np.array([float(arr)], dtype=float)
-            return arr
+            elif arr.ndim == 0:                   # scalar → len‑1 vector
+                arr = np.array([float(arr)])
+            return arr.astype(float)
 
-        has = (
-            lambda v: hasattr(fit, "metadata")
-            and v in fit.metadata.stan_vars
-        )
+        has = lambda v: hasattr(fit, "metadata") and v in fit.metadata.stan_vars
 
-        # ---------------- trend parameters ------------------------
+        # ---- AR(1) disturbance (optional) ------------------------
+        self._rho = _scalar("rho")  if has("rho")  else 0.0
+        self._mu0 = _scalar("mu0")  if has("mu0")  else 0.0
+
+        # ---- trend ----------------------------------------------
         self._k     = _scalar("k")
-        self._m     = _scalar("m")        # **intercept only — no quadratic**
+        self._m     = _scalar("m")        # intercept only – no quadratic
         self._gamma = _scalar("gamma")
         self._delta = _vector("delta") if has("delta") else np.zeros(0)
 
-        # ---------------- seasonality -----------------------------
+        # ---- seasonality ----------------------------------------
         self._A = _vector("A_sin")
         self._B = _vector("B_cos")
+        assert len(self._A) == self._H == len(self._B), "Fourier length mismatch"
 
-        # ---------------- Gaussian head only ----------------------
-        self._sigma = _scalar("sigma") if (likelihood == "gaussian" and has("sigma")) else None
-        self.fit = fit
+        # ---- Gaussian head --------------------------------------
+        self._sigma = _scalar("sigma") if likelihood == "gaussian" and has("sigma") else None
+        self.fit    = fit
 
     # ------------------------------------------------------------------
     def predict(
@@ -124,33 +116,37 @@ class ChurnProphetModel:
     ) -> np.ndarray:
 
         if method != "mean_params":
-            raise NotImplementedError("Only mean_params is implemented.")
+            raise NotImplementedError
 
         t_new = np.asarray(t_new, float)
         out   = np.empty_like(t_new)
 
+        lag_state = self._mu0                        # AR(1) initial state
         for j, t in enumerate(t_new):
-            # ---------- piece‑wise‑linear trend --------------------
-            cp = (
-                np.sum(self._delta * expit(self._gamma * (t - self.s)))
-                if self._delta.size
-                else 0.0
-            )
+
+            # ---- piece‑wise‑linear trend ---------------------------------
+            cp = np.sum(self._delta * expit(self._gamma * (t - self.s))
+                        ) if self._delta.size else 0.0
             mu = self._k * t + self._m + cp
 
-            # ---------- additive Fourier seasonality --------------
+            # ---- additive Fourier seasonality ----------------------------
             pos = 0
             for P, H in zip(self.periods, self.n_harm):
                 tau = t % P
-                for k in range(1, H + 1):
-                    ang = 2 * np.pi * k * tau / P
+                for h in range(1, H + 1):
+                    ang = 2 * np.pi * h * tau / P
                     mu += self._A[pos] * np.sin(ang) + self._B[pos] * np.cos(ang)
                     pos += 1
 
-            # ---------- likelihood link ----------------------------
+            # ---- AR(1) disturbance  --------------------------------------
+            mu += self._rho * lag_state
+            lag_state = mu
+
+            # ---- link function -------------------------------------------
             out[j] = expit(mu) if self.lik == "beta" else mu
 
         return out
+
 
 
 # ────────────────────────────────────────────────────────────────
