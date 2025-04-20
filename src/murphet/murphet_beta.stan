@@ -5,6 +5,11 @@
 //  • heteroscedastic precision:  φᵢ declines when |μ_det| is large
 // ─────────────────────────────────────────────────────────────
 functions {
+  // Helper to ensure minimum values to avoid numerical issues
+  real safe_positive(real x, real min_val) {
+    return fmax(x, min_val);
+  }
+
   /**  parallel log‑likelihood over a slice, beta head */
   real partial_sum_beta(array[] real   y_slice,
                         int             start,
@@ -54,11 +59,12 @@ functions {
       lag      = mu;
 
       // ── heteroscedastic precision  φᵢ  ───────────────────────
-      real phi_i = exp(log_phi0 - beta_phi * abs(mu_det));
+      real phi_i = safe_positive(exp(log_phi0 - beta_phi * abs(mu_det)), 1e-5);
+
       // ── Beta likelihood  yᵢ ~ Beta(p·φᵢ, (1‑p)·φᵢ) ───────────
       real p   = inv_logit(mu);
-      real alpha = fmax(p * phi_i, 1e-5);  // Ensure first parameter is positive
-      real beta = fmax((1 - p) * phi_i, 1e-5);  // Ensure second parameter is positive
+      real alpha = safe_positive(p * phi_i, 1e-5);  // Ensure first parameter is positive
+      real beta = safe_positive((1 - p) * phi_i, 1e-5);  // Ensure second parameter is positive
       lp += beta_lpdf(y_slice[i] | alpha, beta);
     }
     return lp;
