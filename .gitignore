@@ -7,3 +7,8 @@
 /tests/compare_and_plot.py
 /tests/cv_metric_comparison.png
 /tests/improved_comparison.png
+/tests/compare_murphet_prophet.py
+/tests/bike_rentals_compare.py
+/tests/tuned_parameters_compare.py
+/examples/data/Churn_Rate.csv
+/examples/Test_Churn_Rate.ipynb
