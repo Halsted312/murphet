@@ -55,55 +55,90 @@ def _suggest_periods(y: np.ndarray,
 # 2)  Predictor façade (posterior / MAP means)
 # ────────────────────────────────────────────────────────────────
 class ChurnProphetModel:
-    """Fast vectorised predictor (posterior‑mean parameters)."""
+    """Fast vectorised predictor built from posterior / MAP means."""
 
-    def __init__(self,
-                 fit: CmdStanMCMC | CmdStanMLE | CmdStanVB | CmdStanGQ,
-                 changepoints: np.ndarray,
-                 periods: list[float],
-                 n_harm: list[int],
-                 likelihood: Literal["beta", "gaussian"]):
+    def __init__(
+        self,
+        fit: CmdStanMCMC | CmdStanMLE | CmdStanVB | CmdStanGQ,
+        changepoints: np.ndarray,
+        periods: list[float],
+        n_harm: list[int],
+        likelihood: Literal["beta", "gaussian"],
+    ):
         self.lik      = likelihood
         self.s        = changepoints
         self.periods  = periods
         self.n_harm   = n_harm
         self._H       = sum(n_harm)
 
-        # ------- helper that works for MAP (scalar) & MCMC (array) ----------
-        def _mean(var: str):
-            raw = fit.stan_variable(var) if hasattr(fit, "stan_variable") \
-                  else fit.optimized_params_dict[var]
+        # ---------------- helper extractors -----------------------
+        # works for *both* MAP (scalar) and MCMC / VB (array)
+        def _scalar(var: str) -> float:
+            raw = (
+                fit.stan_variable(var)
+                if hasattr(fit, "stan_variable")
+                else fit.optimized_params_dict[var]
+            )
             arr = np.asarray(raw)
-            return arr.mean(axis=0) if arr.ndim else float(arr)
+            return float(arr.mean())  # always collapse to python float
 
-        has = lambda v: hasattr(fit, "metadata") and v in fit.metadata.stan_vars
+        def _vector(var: str) -> np.ndarray:
+            raw = (
+                fit.stan_variable(var)
+                if hasattr(fit, "stan_variable")
+                else fit.optimized_params_dict[var]
+            )
+            arr = np.asarray(raw, float)
+            #   shape (S, H)  → mean over draws
+            if arr.ndim == 2:
+                arr = arr.mean(axis=0)
+            #   shape ()      → turn scalar into length‑1 vector
+            elif arr.ndim == 0:
+                arr = np.array([float(arr)], dtype=float)
+            return arr
 
-        self._k      = _mean("k")
-        self._m      = _mean("m")
-        self._gamma  = _mean("gamma")
-        self._delta  = _mean("delta") if has("delta") else np.zeros(0)
-        self._A      = _mean("A_sin")
-        self._B      = _mean("B_cos")
-        self._sigma  = _mean("sigma") if likelihood == "gaussian" and has("sigma") else None
-        self.fit     = fit
+        has = (
+            lambda v: hasattr(fit, "metadata")
+            and v in fit.metadata.stan_vars
+        )
+
+        # ---------------- trend parameters ------------------------
+        self._k     = _scalar("k")
+        self._m     = _scalar("m")        # **intercept only — no quadratic**
+        self._gamma = _scalar("gamma")
+        self._delta = _vector("delta") if has("delta") else np.zeros(0)
+
+        # ---------------- seasonality -----------------------------
+        self._A = _vector("A_sin")
+        self._B = _vector("B_cos")
+
+        # ---------------- Gaussian head only ----------------------
+        self._sigma = _scalar("sigma") if (likelihood == "gaussian" and has("sigma")) else None
+        self.fit = fit
 
     # ------------------------------------------------------------------
-    def predict(self,
-                t_new: Sequence[float] | np.ndarray,
-                method: Literal["mean_params"] = "mean_params") -> np.ndarray:
+    def predict(
+        self,
+        t_new: Sequence[float] | np.ndarray,
+        method: Literal["mean_params"] = "mean_params",
+    ) -> np.ndarray:
+
         if method != "mean_params":
-            raise NotImplementedError
+            raise NotImplementedError("Only mean_params is implemented.")
 
         t_new = np.asarray(t_new, float)
         out   = np.empty_like(t_new)
 
         for j, t in enumerate(t_new):
-            # piece‑wise‑linear trend
-            cp = np.sum(self._delta * expit(self._gamma * (t - self.s))
-                        ) if self._delta.size else 0.0
+            # ---------- piece‑wise‑linear trend --------------------
+            cp = (
+                np.sum(self._delta * expit(self._gamma * (t - self.s)))
+                if self._delta.size
+                else 0.0
+            )
             mu = self._k * t + self._m + cp
 
-            # additive Fourier seasonality
+            # ---------- additive Fourier seasonality --------------
             pos = 0
             for P, H in zip(self.periods, self.n_harm):
                 tau = t % P
@@ -112,8 +147,11 @@ class ChurnProphetModel:
                     mu += self._A[pos] * np.sin(ang) + self._B[pos] * np.cos(ang)
                     pos += 1
 
+            # ---------- likelihood link ----------------------------
             out[j] = expit(mu) if self.lik == "beta" else mu
+
         return out
+
 
 # ────────────────────────────────────────────────────────────────
 # 3)  public fit function

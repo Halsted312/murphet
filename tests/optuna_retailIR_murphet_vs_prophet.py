@@ -42,7 +42,7 @@ CV_STEP         = 3
 HOLD_OUT_MO     = 12         # final test window
 LB_LAGS         = 12
 SEED            = 42
-TRIALS_MUR      = 4
+TRIALS_MUR      = 20
 TRIALS_PROP     = 4
 
 # ───────────────────── load & prep data ────────────────────
