@@ -7,7 +7,7 @@ ROOT = Path(__file__).parent
 setup(
     # -----------------------------------------------------------------
     name                = "murphet",
-    version             = "1.5.1",                       # ← keep in sync
+    version             = "1.5.3",                       # ← keep in sync
     description         = ("Bayesian time‑series model with "
                            "Beta/Gaussian heads, smooth changepoints "
                            "and seasonality"),

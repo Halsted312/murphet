@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name            = "murphet"
-version         = "1.5.1"
+version         = "1.5.3"
 description     = "Bayesian time‑series model with Beta/Gaussian heads, smooth changepoints and seasonality"
 readme          = { file = "README.md", content-type = "text/markdown" }   # ← MIME helps PyPI render correctly
 requires-python = ">=3.8"

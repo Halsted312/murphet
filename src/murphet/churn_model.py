@@ -262,6 +262,21 @@ def _suggest_periods(y: np.ndarray,
                 break
     return out
 
+# -----------------------------------------------------------------
+# 2· misc tiny helpers
+# -----------------------------------------------------------------
+def _trim_changepoints(d: dict):
+    n = int(d["num_changepoints"])
+    if len(d["s"]) != n:
+        d["s"] = d["s"][:n]
+
+def _clip_simple(d: dict):                       #  <<< NEW
+    """Ultra‑wide but safe hyper‑prior clamps for the simple fallback."""
+    _trim_changepoints(d)
+    d["delta_scale"]  = float(np.clip(d["delta_scale"], 1e-5, 0.90))
+    d["gamma_scale"]  = float(np.clip(d["gamma_scale"], 1e-3, 10.0))
+    d["season_scale"] = float(np.clip(d["season_scale"], 1e-4, 10.0))
+
 # ────────────────────────────────────────────────────────────────
 # 2)  Predictor façade (posterior / MAP means)   ✅ final version
 # ────────────────────────────────────────────────────────────────
@@ -608,18 +623,33 @@ def fit_churn_model(
         raise ValueError("len(num_harmonics) must match len(periods)")
     num_harmonics = [int(h) for h in num_harmonics]
 
+    def _smart_changepoints(t: np.ndarray, y: np.ndarray, k: int) -> np.ndarray:
+        """Return k changepoint locations biased toward high curvature."""
+        # 1) smooth the series to kill noise
+        from scipy.ndimage import gaussian_filter1d
+        y_s = gaussian_filter1d(y, sigma=max(1, len(y) // 60))
+
+        # 2) absolute 2nd difference as “importance” score
+        curv = np.abs(np.diff(y_s, n=2, prepend=[y_s[0], y_s[0]]))
+
+        # 3) convert to CDF → pick equally‑spaced quantiles in *curvature space*
+        cdf = np.cumsum(curv)
+        cdf = cdf / cdf[-1]
+        qs = np.linspace(0.05, 0.95, k)  # slightly tighter edges
+        idx = np.searchsorted(cdf, qs)
+        return t[idx]
+
     # ── changepoints (Prophet heuristic) ──────────────────────────
     if changepoints is None:
         if n_changepoints is None:
             n_changepoints = max(1, int(0.2 * len(t)))
-        qs = np.linspace(0.1, 0.9, n_changepoints + 2)[1:-1]
-        changepoints = np.quantile(t, qs)
+        changepoints = _smart_changepoints(t, y, n_changepoints)
     else:
         changepoints = np.sort(np.asarray(changepoints, float))
         n_changepoints = changepoints.size
 
     # ── threading & env var ───────────────────────────────────────
-    threads_per_chain = threads_per_chain or min(_mp.cpu_count(), 4)
+    threads_per_chain = threads_per_chain or min(_mp.cpu_count(), 1)
     os.environ["STAN_NUM_THREADS"] = str(threads_per_chain)
 
     # ── Stan data dict ────────────────────────────────────────────
@@ -634,133 +664,260 @@ def fit_churn_model(
 
     model = _get_model(likelihood)
 
-    # ── inference routes ─────────────────────────────────────────
+    # -----------------------------------------------------------------
+    # 3·  Calm initial‑value helper  (place once, just above inference)
+    # -----------------------------------------------------------------
+    def _zero_init(sd: dict) -> dict:
+        """Return a single‑chain dict of near‑zero initials for LBFGS/BFGS."""
+        return dict(
+            k=0.0,
+            m=0.0,
+            delta=np.zeros(sd["num_changepoints"]),
+            gamma=1.0,
+            rho=0.0,
+            mu0=0.0,
+            A_sin=np.zeros(sd["total_harmonics"]),
+            B_cos=np.zeros(sd["total_harmonics"]),
+            log_phi0=np.log(10.0),
+            beta_phi=0.1,
+        )
+
+    # -----------------------------------------------------------------
+    # 4·  inference routes
+    # -----------------------------------------------------------------
+    data_used = stan_data  # ← keep a pointer to the dict we hand to Stan
+
+    # ------------------------------------------------------------------#
+    #  MAP  (primary)                                                   #
+    # ------------------------------------------------------------------#
     if inference == "map":
-        try:
+        try:  # ── primary attempt ───────────
+            data_used = stan_data
             with SuppressOutput():
-                fit = model.optimize(data=stan_data, algorithm="lbfgs",
-                                     iter=10000, seed=seed, show_console=False)
-        except Exception as e:
-            concise_error = extract_key_error(e)
-            warnings.warn(f"Optimization failed: {concise_error}. Trying alternative settings.")
+                fit = model.optimize(
+                    data=data_used,
+                    algorithm="lbfgs",
+                    iter=10_000,
+                    seed=seed,
+                    inits=_zero_init(data_used),
+                    show_console=False,
+                )
+
+        except Exception as err:
+            warnings.warn(
+                f"Optimization failed: {extract_key_error(err)}.  Trying BFGS rescue."
+            )
+
+            # -------- 1st rescue – slightly safer hyper‑scales ----------
+            data_used = stan_data_safe = stan_data.copy()
+            data_used["delta_scale"] = min(stan_data["delta_scale"], 0.10)
+            data_used["gamma_scale"] = max(min(stan_data["gamma_scale"], 8.0), 3.0)
 
             try:
-                # Try again with alternative settings
-                stan_data_safe = stan_data.copy()
-                stan_data_safe["delta_scale"] = min(stan_data["delta_scale"], 0.2)
-                stan_data_safe["gamma_scale"] = max(min(stan_data["gamma_scale"], 8.0), 2.0)
-
-                # Try bfgs as fallback algorithm
                 with SuppressOutput():
-                    fit = model.optimize(data=stan_data_safe, algorithm="bfgs",
-                                         iter=5000, seed=seed if seed is not None else 42,
-                                         show_console=False)
-            except Exception as e2:
-                concise_error = extract_key_error(e2)
+                    fit = model.optimize(
+                        data=data_used,
+                        algorithm="bfgs",
+                        iter=5_000,
+                        seed=seed or 42,
+                        inits=_zero_init(data_used),
+                        show_console=False,
+                    )
+
+            except Exception as err2:
                 warnings.warn(
-                    f"Second optimization attempt also failed: {concise_error}. Final attempt with simpler model.")
-                # Final attempt with minimal model complexity
-                stan_data_simple = stan_data.copy()
-                stan_data_simple["delta_scale"] = 0.05
-                stan_data_simple["gamma_scale"] = 3.0
-                stan_data_simple["season_scale"] = 0.5
-                stan_data_simple["num_changepoints"] = min(stan_data_simple["num_changepoints"], 3)
+                    f"BFGS rescue also failed: {extract_key_error(err2)}.  "
+                    "Falling back to an even simpler model."
+                )
+
+                # -------- 2nd rescue – ultra‑simple model ---------------
+                data_used = stan_data_simple = stan_data.copy()
+                data_used.update(
+                    delta_scale=0.10,
+                    gamma_scale=3.0,
+                    season_scale=1.0,
+                    num_changepoints=min(stan_data_simple["num_changepoints"], 3),
+                )
+                _clip_simple(data_used)
 
                 with SuppressOutput():
-                    fit = model.optimize(data=stan_data_simple, algorithm="bfgs",
-                                         iter=2000, seed=seed if seed is not None else 42,
-                                         show_console=False)
+                    fit = model.optimize(
+                        data=data_used,
+                        algorithm="bfgs",
+                        iter=2_000,
+                        seed=seed or 42,
+                        inits=_zero_init(data_used),
+                        show_console=False,
+                    )
 
+    # ------------------------------------------------------------------#
+    #  ADVI  (variational)                                              #
+    # ------------------------------------------------------------------#
     elif inference == "advi":
         try:
+            data_used = stan_data
             with SuppressOutput():
-                fit = model.variational(data=stan_data, algorithm="meanfield",
-                                        iter=iter, draws=400,
-                                        grad_samples=20, elbo_samples=20,
-                                        tol_rel_obj=2e-3, seed=seed,
-                                        show_console=False)
+                fit = model.variational(
+                    data=data_used,
+                    algorithm="meanfield",
+                    iter=iter,
+                    draws=400,
+                    grad_samples=20,
+                    elbo_samples=20,
+                    tol_rel_obj=2e-3,
+                    seed=seed,
+                    show_console=False,
+                )
             if fit.num_draws < 1:
                 raise RuntimeError("ADVI returned no draws")
-        except Exception as e:
-            concise_error = extract_key_error(e)
-            warnings.warn(f"ADVI failed: {concise_error}. Falling back to MAP.")
+
+        except Exception as err:
+            warnings.warn(
+                f"ADVI failed: {extract_key_error(err)}.  Switching to MAP fallback."
+            )
+
+            data_used = stan_data_safe = stan_data.copy()
+            data_used["delta_scale"] = min(stan_data["delta_scale"], 0.30)
+            data_used["gamma_scale"] = max(min(stan_data["gamma_scale"], 8.0), 3.0)
+
             try:
-                # Fall back to MAP with conservative settings
-                stan_data_safe = stan_data.copy()
-                stan_data_safe["delta_scale"] = min(stan_data["delta_scale"], 0.2)
-                stan_data_safe["gamma_scale"] = max(min(stan_data["gamma_scale"], 8.0), 2.0)
+                with SuppressOutput():
+                    fit = model.optimize(
+                        data=data_used,
+                        algorithm="lbfgs",
+                        iter=5_000,
+                        seed=seed or 42,
+                        inits=_zero_init(data_used),
+                        show_console=False,
+                    )
+
+            except Exception as err2:
+                warnings.warn(
+                    f"MAP fallback also failed: {extract_key_error(err2)}.  "
+                    "Trying very simple model."
+                )
+
+                data_used = stan_data_simple = stan_data.copy()
+                data_used.update(
+                    delta_scale=0.10,
+                    gamma_scale=3.0,
+                    season_scale=1.0,
+                    num_changepoints=min(stan_data_simple["num_changepoints"], 3),
+                )
+                _clip_simple(data_used)
 
                 with SuppressOutput():
-                    fit = model.optimize(data=stan_data_safe, algorithm="lbfgs",
-                                         iter=5000, seed=seed if seed is not None else 42,
-                                         show_console=False)
-            except Exception as e2:
-                concise_error = extract_key_error(e2)
-                warnings.warn(f"MAP fallback also failed: {concise_error}. Final attempt with simpler model.")
-                # Final attempt with minimal model
-                stan_data_simple = stan_data.copy()
-                stan_data_simple["delta_scale"] = 0.05
-                stan_data_simple["gamma_scale"] = 3.0
-                stan_data_simple["season_scale"] = 0.5
-                stan_data_simple["num_changepoints"] = min(stan_data_simple["num_changepoints"], 3)
+                    fit = model.optimize(
+                        data=data_used,
+                        algorithm="bfgs",
+                        iter=2_000,
+                        seed=seed or 42,
+                        inits=_zero_init(data_used),
+                        show_console=False,
+                    )
 
-                with SuppressOutput():
-                    fit = model.optimize(data=stan_data_simple, algorithm="bfgs",
-                                         iter=2000, seed=seed if seed is not None else 42,
-                                         show_console=False)
-
+    # ------------------------------------------------------------------#
+    #  NUTS  (full HMC)                                                 #
+    # ------------------------------------------------------------------#
     elif inference == "nuts":
-        try:
+        try:  # ── primary attempt ───────────
+            data_used = stan_data
             with SuppressOutput(suppress_stdout=True, suppress_stderr=True):
                 fit = model.sample(
-                    data=stan_data, chains=chains, parallel_chains=chains,
-                    iter_warmup=warmup, iter_sampling=iter - warmup,
-                    adapt_delta=adapt_delta, max_treedepth=max_treedepth,
-                    threads_per_chain=threads_per_chain, seed=seed,
-                    show_progress=False, show_console=False)
-        except Exception as e:
-            concise_error = extract_key_error(e)
-            warnings.warn(f"NUTS sampling failed: {concise_error}. Falling back to ADVI.")
+                    data=data_used,
+                    chains=chains,
+                    parallel_chains=chains,
+                    iter_warmup=warmup,
+                    iter_sampling=iter - warmup,
+                    adapt_delta=adapt_delta,
+                    max_treedepth=max_treedepth,
+                    threads_per_chain=threads_per_chain,
+                    seed=seed,
+                    show_progress=False,
+                    show_console=False,
+                )
+
+        except Exception as err:
+            warnings.warn(
+                f"NUTS sampling failed: {extract_key_error(err)}.  Falling back to ADVI."
+            )
+
+            # -------- NUTS → ADVI rescue -------------------------------
             try:
-                # Try ADVI instead
+                data_used = stan_data
                 with SuppressOutput():
-                    fit = model.variational(data=stan_data, algorithm="meanfield",
-                                            iter=iter, draws=400,
-                                            grad_samples=20, elbo_samples=20,
-                                            tol_rel_obj=2e-3, seed=seed,
-                                            show_console=False)
+                    fit = model.variational(
+                        data=data_used,
+                        algorithm="meanfield",
+                        iter=iter,
+                        draws=400,
+                        grad_samples=20,
+                        elbo_samples=20,
+                        tol_rel_obj=2e-3,
+                        seed=seed,
+                        show_console=False,
+                    )
                 if fit.num_draws < 1:
                     raise RuntimeError("ADVI returned no draws")
-            except Exception as e2:
-                concise_error = extract_key_error(e2)
-                warnings.warn(f"ADVI fallback also failed: {concise_error}. Falling back to MAP.")
-                # Try MAP as last resort
+
+            except Exception as err2:
+                warnings.warn(
+                    f"ADVI fallback also failed: {extract_key_error(err2)}.  "
+                    "Trying MAP as a last resort."
+                )
+
                 try:
+                    data_used = stan_data_safe = stan_data.copy()
                     with SuppressOutput():
-                        fit = model.optimize(data=stan_data, algorithm="lbfgs",
-                                             iter=5000, seed=seed if seed is not None else 42,
-                                             show_console=False)
-                except Exception as e3:
-                    concise_error = extract_key_error(e3)
-                    warnings.warn(f"All inference methods failed: {concise_error}. Using simplest model.")
-                    # Final desperate attempt with extremely simple model
-                    stan_data_simple = stan_data.copy()
-                    stan_data_simple["delta_scale"] = 0.05
-                    stan_data_simple["gamma_scale"] = 3.0
-                    stan_data_simple["season_scale"] = 0.5
-                    stan_data_simple["num_changepoints"] = min(stan_data_simple["num_changepoints"], 2)
-                    stan_data_simple["n_harmonics"] = [1] * len(stan_data_simple["period"])
-                    stan_data_simple["total_harmonics"] = sum(stan_data_simple["n_harmonics"])
+                        fit = model.optimize(
+                            data=data_used,
+                            algorithm="lbfgs",
+                            iter=5_000,
+                            seed=seed or 42,
+                            inits=_zero_init(data_used),
+                            show_console=False,
+                        )
+
+                except Exception as err3:
+                    warnings.warn(
+                        f"LBFGS failed too: {extract_key_error(err3)}.  "
+                        "Using the simplest model possible."
+                    )
+
+                    data_used = stan_data_simple = stan_data.copy()
+                    data_used.update(
+                        delta_scale=0.15,
+                        gamma_scale=3.0,
+                        season_scale=1.0,
+                        num_changepoints=min(stan_data_simple["num_changepoints"], 2),
+                        n_harmonics=[1] * len(stan_data_simple["period"]),
+                    )
+                    data_used["total_harmonics"] = sum(data_used["n_harmonics"])
+                    _clip_simple(data_used)
 
                     with SuppressOutput():
-                        fit = model.optimize(data=stan_data_simple, algorithm="bfgs",
-                                             iter=2000, seed=seed if seed is not None else 42,
-                                             show_console=False)
+                        fit = model.optimize(
+                            data=data_used,
+                            algorithm="bfgs",
+                            iter=2_000,
+                            seed=seed or 42,
+                            inits=_zero_init(data_used),
+                            show_console=False,
+                        )
+
+    # ------------------------------------------------------------------#
+    #  Invalid keyword                                                  #
+    # ------------------------------------------------------------------#
     else:
         raise ValueError("inference must be 'map', 'advi' or 'nuts'.")
 
+    # -----------------------------------------------------------------
+    # 5·  build predictor  — use `data_used["s"]`
+    # -----------------------------------------------------------------
     return ChurnProphetModel(
-        fit, changepoints=np.asarray(changepoints, float),
-        periods=periods, n_harm=num_harmonics,
+        fit,
+        changepoints=np.asarray(data_used["s"], float),  # ← always matches Stan
+        periods=periods,
+        n_harm=num_harmonics,
         likelihood=likelihood,
     )
